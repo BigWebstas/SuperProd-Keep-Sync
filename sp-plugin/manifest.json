@@ -1,7 +1,7 @@
 {
   "id": "keep-list-sync",
   "name": "Google Keep List Sync",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Two-way sync between a Google Keep checklist and a Super Productivity project — checking/renaming items on either side updates the other (desktop only; requires the keep-sync-daemon companion script).",
   "manifestVersion": 1,
   "minSupVersion": "14.0.0",
@@ -12,7 +12,7 @@
   "permissions": [
     "addTask",
     "updateTask",
-    "getTasks",
+    "getAppState",
     "getAllProjects",
     "persistDataSynced",
     "loadSyncedData",

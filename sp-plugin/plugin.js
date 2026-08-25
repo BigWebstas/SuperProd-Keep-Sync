@@ -184,17 +184,23 @@ async function runSync() {
     // listens for, so those edits would otherwise never reach Keep. A
     // full diff against live task state on every cycle catches them
     // regardless of how the change actually arrived.
+    //
+    // Uses getAppState() rather than getTasks(): getTasks() only returns
+    // *active* tasks (there's a separate getArchivedTasks() for the
+    // rest), so a task checked off and already archived on the source
+    // device before syncing here would be invisible to it — the diff
+    // below would see it as "missing" and (wrongly) treat that the same
+    // as deleted. getAppState().tasks covers active and archived alike.
     try {
       const trackedTaskIds = Object.values(noteMap)
         .map((entry) => entry.taskId)
         .filter(Boolean);
       if (trackedTaskIds.length > 0) {
-        const liveTasks = await PluginAPI.getTasks();
-        const liveById = new Map(liveTasks.map((t) => [t.id, t]));
+        const state = await PluginAPI.getAppState();
         for (const itemId of Object.keys(noteMap)) {
           const entry = noteMap[itemId];
           if (!entry.taskId) continue;
-          const liveTask = liveById.get(entry.taskId);
+          const liveTask = state.tasks[entry.taskId];
           if (!liveTask) continue; // deleted in SP — deletes don't propagate (see README)
           if (liveTask.title !== entry.text || liveTask.isDone !== entry.checked) {
             await queuePendingChange(cfg, note.id, itemId, liveTask.title, liveTask.isDone);
