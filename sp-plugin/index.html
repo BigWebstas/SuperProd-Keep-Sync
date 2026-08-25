@@ -176,6 +176,36 @@
         return escapeHtml(s);
       }
 
+      function showInitError(e) {
+        noteSelect.innerHTML = '<option value="">(failed to load — see console)</option>';
+        statusBox.textContent = `Plugin failed to initialize: ${(e && e.message) || e}`;
+        statusBox.className = 'card err';
+        console.error('[keep-list-sync] init failed', e);
+      }
+
+      // On some Super Productivity builds the window.PluginAPI bridge is
+      // injected into the iframe body after this inline script has already
+      // run (host issue #9526: the bridge script tag lands after ours in
+      // parse order), so `PluginAPI` can be a ReferenceError at the top of
+      // this file even though it appears moments later. Poll for it instead
+      // of assuming it's there.
+      function waitForPluginApi(timeoutMs) {
+        return new Promise((resolve, reject) => {
+          const start = Date.now();
+          (function check() {
+            if (typeof window.PluginAPI !== 'undefined') {
+              resolve();
+              return;
+            }
+            if (Date.now() - start > timeoutMs) {
+              reject(new Error('PluginAPI was never injected into this iframe (a known issue on some Super Productivity builds — try updating the app).'));
+              return;
+            }
+            setTimeout(check, 50);
+          })();
+        });
+      }
+
       async function init() {
         try {
           const cfg = await loadConfig();
@@ -189,10 +219,7 @@
 
           await loadStatus();
         } catch (e) {
-          noteSelect.innerHTML = '<option value="">(failed to load — see console)</option>';
-          statusBox.textContent = `Plugin failed to initialize: ${(e && e.message) || e}`;
-          statusBox.className = 'card err';
-          console.error('[keep-list-sync] init failed', e);
+          showInitError(e);
         }
       }
 
@@ -220,7 +247,7 @@
         setTimeout(loadStatus, 1500);
       });
 
-      init();
+      waitForPluginApi(5000).then(init).catch(showInitError);
     </script>
   </body>
 </html>
