@@ -19,6 +19,7 @@ Packaging into a standalone Linux binary (see README.md):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -51,6 +52,9 @@ if getattr(sys, "frozen", False):
 else:
     APP_DIR = Path(__file__).parent
 CONFIG_PATH = APP_DIR / "config.json"
+LOG_PATH = APP_DIR / "keep_sync_tray_qt.log"
+
+log = core.setup_logging(LOG_PATH)
 
 AUTOSTART_DESKTOP_PATH = Path.home() / ".config" / "autostart" / "keep-sync-tray.desktop"
 
@@ -313,12 +317,12 @@ class TrayApp(QObject):
         threading.Thread(target=self._run_sync, daemon=True).start()
 
     def open_data_folder(self) -> None:
-        state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
-        state_dir.mkdir(parents=True, exist_ok=True)
         try:
+            state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
+            state_dir.mkdir(parents=True, exist_ok=True)
             subprocess.Popen(["xdg-open", str(state_dir)])
         except OSError:
-            pass
+            log.exception("failed to open data folder")
 
     def start_scheduler(self) -> None:
         self.stop_event.clear()
@@ -330,11 +334,17 @@ class TrayApp(QObject):
 
     def _scheduler_loop(self) -> None:
         while not self.stop_event.is_set():
-            self._run_sync()
+            try:
+                self._run_sync()
+            except Exception:
+                # A single bad sync (e.g. one malformed Keep item) must not
+                # permanently kill background syncing for every other note.
+                log.exception("sync raised unexpectedly; will retry next interval")
             interval_minutes = max(1, int(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES)))
             self.stop_event.wait(interval_minutes * 60)
 
     def reconfigure(self) -> None:
+        log.info("reconfigure requested")
         self.stop_scheduler()
         new_cfg = run_setup_dialog(self.cfg)
         if new_cfg is not None:
@@ -342,6 +352,7 @@ class TrayApp(QObject):
         self.start_scheduler()
 
     def quit(self) -> None:
+        log.info("quit requested")
         self.stop_scheduler()
         self.tray_icon.hide()
         QApplication.instance().quit()
@@ -371,6 +382,7 @@ def run_selftest() -> int:
 
 
 def main() -> int:
+    log.info("KeepSyncTrayQt starting (frozen=%s, dir=%s)", getattr(sys, "frozen", False), APP_DIR)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
@@ -378,11 +390,14 @@ def main() -> int:
     if needs_setup(cfg):
         cfg = run_setup_dialog(cfg)
         if cfg is None:
+            log.info("setup dialog closed without finishing; exiting")
             return 0  # user closed setup without finishing
 
     tray = TrayApp(cfg)
     tray.show()
-    return app.exec()
+    exit_code = app.exec()
+    log.info("KeepSyncTrayQt exiting (code=%s)", exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":
@@ -390,9 +405,12 @@ if __name__ == "__main__":
         raise SystemExit(run_selftest())
     try:
         raise SystemExit(main())
-    except Exception as e:
+    except SystemExit:
+        raise
+    except BaseException as e:
+        log.critical("KeepSyncTrayQt crashed", exc_info=True)
         try:
-            QMessageBox.critical(None, APP_NAME, f"Unexpected error, exiting:\n{e}")
+            QMessageBox.critical(None, APP_NAME, f"Unexpected error, exiting:\n{e}\n\nSee {LOG_PATH} for details.")
         except Exception:
             pass
         raise

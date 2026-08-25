@@ -13,6 +13,8 @@ up-to-date state. See apply_pending_changes().
 from __future__ import annotations
 
 import json
+import logging
+import logging.handlers
 import os
 import stat
 import tempfile
@@ -23,6 +25,39 @@ from pathlib import Path
 import gkeepapi
 import gkeepapi.node
 import gpsoauth
+
+LOGGER_NAME = "keep_sync"
+
+
+def setup_logging(log_path: Path) -> logging.Logger:
+    """Configures the shared "keep_sync" logger to write to log_path (a
+    1MB x 3 rotating file) and installs sys.excepthook /
+    threading.excepthook so uncaught exceptions get logged instead of
+    vanishing — the tray apps are --windowed builds with no console, so a
+    log file is the only place errors are visible at all."""
+    import sys
+    import threading
+
+    logger = logging.getLogger(LOGGER_NAME)
+    logger.setLevel(logging.INFO)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(threadName)s] %(message)s"))
+    logger.addHandler(handler)
+
+    def log_uncaught(exc_type, exc_value, exc_tb):
+        logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    def log_uncaught_thread(args: "threading.ExceptHookArgs"):
+        logger.error(
+            "Uncaught exception in thread %r", args.thread.name if args.thread else "?",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    sys.excepthook = log_uncaught
+    threading.excepthook = log_uncaught_thread
+    return logger
 
 DEFAULT_ANDROID_ID = "0000000000000000"
 DEFAULT_STATE_DIR = "~/.sp-keep-sync"
@@ -174,6 +209,9 @@ def sync_once(cfg: dict) -> SyncResult:
     the previous state.json is left untouched, matching the CLI daemon's
     contract, so a transient Keep/login error never blanks out the plugin's
     view."""
+    log = logging.getLogger(LOGGER_NAME)
+    log.info("sync starting for %s", cfg.get("email"))
+
     state_dir = resolve_state_dir(cfg["state_dir"])
     state_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -188,6 +226,7 @@ def sync_once(cfg: dict) -> SyncResult:
     try:
         master_token = get_master_token(state_dir)
     except RuntimeError as e:
+        log.warning("sync aborted: %s", e)
         return SyncResult(False, str(e))
 
     keep = gkeepapi.Keep()
@@ -202,19 +241,23 @@ def sync_once(cfg: dict) -> SyncResult:
 
         pending = load_pending_changes(pending_path)
         if pending:
-            if apply_pending_changes(keep, pending):
+            applied = apply_pending_changes(keep, pending)
+            log.info("applied %d pending Super Productivity edit(s)", applied)
+            if applied:
                 keep.sync()  # push the queued Super Productivity edits to Google
             try:
                 pending_path.unlink()
             except OSError:
                 pass
     except gkeepapi.exception.LoginException as e:
+        log.error("Google login failed", exc_info=True)
         return SyncResult(
             False,
             f"Google login failed ({e}). The master token may be stale/revoked, "
             "or Google is challenging this login. Leaving previous state.json untouched.",
         )
     except Exception as e:  # network errors, etc.
+        log.error("sync failed", exc_info=True)
         return SyncResult(False, f"sync failed: {e}. Leaving previous state.json untouched.")
 
     try:
@@ -223,6 +266,11 @@ def sync_once(cfg: dict) -> SyncResult:
         pass  # non-fatal: next login just won't reuse Google's sync cursor
 
     notes = collect_checklists(keep, cfg.get("include_archived", False))
+    log.info(
+        "collected %d checklist note(s): %s",
+        len(notes),
+        ", ".join(f"{n['title']!r} ({len(n['items'])} item(s))" for n in notes) or "(none)",
+    )
     output = {
         "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "notes": notes,
@@ -231,6 +279,8 @@ def sync_once(cfg: dict) -> SyncResult:
     try:
         atomic_write_json(output_path, output, mode=0o644)
     except OSError as e:
+        log.error("failed to write %s", output_path, exc_info=True)
         return SyncResult(False, f"failed to write {output_path}: {e}")
 
+    log.info("sync OK: wrote %d checklist(s) to %s", len(notes), output_path)
     return SyncResult(True, f"wrote {len(notes)} checklist(s) to {output_path}", len(notes))

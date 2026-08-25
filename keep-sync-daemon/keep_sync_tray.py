@@ -20,6 +20,7 @@ Packaging into a standalone .exe (see README.md for the full command):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
@@ -34,12 +35,16 @@ APP_NAME = "Keep Sync"
 
 # When frozen by PyInstaller, __file__ resolves inside a temporary
 # extraction directory that doesn't persist between runs — config.json
-# must live next to the .exe instead so settings survive a restart.
+# (and the log file) must live next to the .exe instead so they survive
+# a restart.
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).parent
 else:
     APP_DIR = Path(__file__).parent
 CONFIG_PATH = APP_DIR / "config.json"
+LOG_PATH = APP_DIR / "keep_sync_tray.log"
+
+log = core.setup_logging(LOG_PATH)
 
 
 def default_config() -> dict:
@@ -298,10 +303,17 @@ class TrayApp:
         threading.Thread(target=self._run_sync, daemon=True).start()
 
     def _open_data_folder(self, icon=None, item=None) -> None:
-        state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
-        state_dir.mkdir(parents=True, exist_ok=True)
-        if hasattr(os, "startfile"):
-            os.startfile(state_dir)  # noqa: S606 — local, user-owned path
+        # pystray menu callbacks can run on the same thread as icon.run();
+        # an uncaught exception here would propagate out of that call and
+        # take the whole tray down with it, so every callback body is
+        # wrapped defensively (see also the scheduler loop below).
+        try:
+            state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
+            state_dir.mkdir(parents=True, exist_ok=True)
+            if hasattr(os, "startfile"):
+                os.startfile(state_dir)  # noqa: S606 — local, user-owned path
+        except Exception:
+            log.exception("failed to open data folder")
 
     def _show_status_window(self, icon=None, item=None) -> None:
         if self.status_window_open.is_set():
@@ -312,21 +324,30 @@ class TrayApp:
         self.status_window_open.set()
         try:
             StatusWindow(self).mainloop()
+        except Exception:
+            log.exception("status window crashed")
         finally:
             self.status_window_open.clear()
 
     def _reconfigure(self, icon=None, item=None) -> None:
+        log.info("reconfigure requested")
         self.reconfigure_requested = True
         self.stop_event.set()
         self.icon.stop()
 
     def _quit(self, icon=None, item=None) -> None:
+        log.info("quit requested")
         self.stop_event.set()
         self.icon.stop()
 
     def _scheduler_loop(self) -> None:
         while not self.stop_event.is_set():
-            self._run_sync()
+            try:
+                self._run_sync()
+            except Exception:
+                # A single bad sync (e.g. one malformed Keep item) must not
+                # permanently kill background syncing for every other note.
+                log.exception("sync raised unexpectedly; will retry next interval")
             interval_minutes = max(1, int(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES)))
             self.stop_event.wait(interval_minutes * 60)
 
@@ -359,12 +380,14 @@ def run_selftest() -> int:
 
 
 def main() -> int:
+    log.info("KeepSyncTray starting (frozen=%s, dir=%s)", getattr(sys, "frozen", False), APP_DIR)
     cfg = load_or_default_config()
 
     while True:
         if needs_setup(cfg):
             cfg = run_setup_window(cfg)
             if cfg is None:
+                log.info("setup window closed without finishing; exiting")
                 return 0  # user closed setup without finishing
 
         app = TrayApp(cfg)
@@ -373,6 +396,7 @@ def main() -> int:
         if app.reconfigure_requested:
             cfg = load_or_default_config()
             continue
+        log.info("KeepSyncTray exiting normally")
         return 0
 
 
@@ -381,9 +405,12 @@ if __name__ == "__main__":
         raise SystemExit(run_selftest())
     try:
         raise SystemExit(main())
-    except Exception as e:  # last-resort surface for a windowed (no console) exe
+    except SystemExit:
+        raise
+    except BaseException as e:  # last-resort surface for a windowed (no console) exe
+        log.critical("KeepSyncTray crashed", exc_info=True)
         try:
-            messagebox.showerror(APP_NAME, f"Unexpected error, exiting:\n{e}")
+            messagebox.showerror(APP_NAME, f"Unexpected error, exiting:\n{e}\n\nSee {LOG_PATH} for details.")
         except Exception:
             pass
         raise
