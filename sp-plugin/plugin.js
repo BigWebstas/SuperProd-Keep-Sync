@@ -80,6 +80,24 @@ async function setStatus(status) {
   await PluginAPI.persistDataSynced(JSON.stringify(status), STATUS_KEY);
 }
 
+// Queues a checked/title edit for the keep-sync daemon to push to Keep on
+// its next cycle (it owns the only Keep-writing credentials — this plugin
+// can only shell out through Node's fs module). Deliberately doesn't touch
+// itemMap: see the long comment on the TASK_UPDATE hook below for why.
+async function queuePendingChange(cfg, noteId, itemId, text, checked) {
+  try {
+    const nodeResult = await nodeApi.executeNodeScript({
+      script: buildQueueChangeScript(cfg.statePath, noteId, itemId, text, checked),
+      timeout: 8000,
+    });
+    if (!nodeResult || !nodeResult.success) {
+      console.warn('[keep-list-sync] failed to queue SP -> Keep change', nodeResult);
+    }
+  } catch (e) {
+    console.warn('[keep-list-sync] failed to queue SP -> Keep change', e);
+  }
+}
+
 async function runSync() {
   if (isSyncing) return;
   isSyncing = true;
@@ -159,6 +177,34 @@ async function runSync() {
       }
     }
 
+    // Safety net alongside the TASK_UPDATE hook below: SP's own
+    // cross-device sync delivers remote changes (from other desktops
+    // running this same SP project) through a bulk-import/hydrate path
+    // that never dispatches the granular updateTask action the hook
+    // listens for, so those edits would otherwise never reach Keep. A
+    // full diff against live task state on every cycle catches them
+    // regardless of how the change actually arrived.
+    try {
+      const trackedTaskIds = Object.values(noteMap)
+        .map((entry) => entry.taskId)
+        .filter(Boolean);
+      if (trackedTaskIds.length > 0) {
+        const liveTasks = await PluginAPI.getTasks();
+        const liveById = new Map(liveTasks.map((t) => [t.id, t]));
+        for (const itemId of Object.keys(noteMap)) {
+          const entry = noteMap[itemId];
+          if (!entry.taskId) continue;
+          const liveTask = liveById.get(entry.taskId);
+          if (!liveTask) continue; // deleted in SP — deletes don't propagate (see README)
+          if (liveTask.title !== entry.text || liveTask.isDone !== entry.checked) {
+            await queuePendingChange(cfg, note.id, itemId, liveTask.title, liveTask.isDone);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[keep-list-sync] failed to reconcile local task changes', e);
+    }
+
     fullMap[note.id] = noteMap;
     await PluginAPI.persistDataSynced(JSON.stringify(fullMap), MAP_KEY);
     await setStatus({
@@ -201,10 +247,24 @@ PluginAPI.registerHook(PluginAPI.Hooks.PERSISTED_DATA_CHANGED, async () => {
   await runSync();
 });
 
-// Queues checked/title edits made in SP for the keep-sync daemon to push
-// to Keep on its next cycle (it owns the only Keep-writing credentials —
-// this plugin can only shell out through Node's fs module). Only fires
-// for tasks this plugin created from a Keep item; other edits are ignored.
+// Fast path for locally-made edits (near-instant, vs. waiting for the next
+// polling cycle) — only fires for tasks this plugin created from a Keep
+// item; other edits are ignored. This does NOT catch edits delivered via
+// SP's own cross-device sync (see the reconciliation pass in runSync()
+// above, which exists specifically to also catch those).
+//
+// Deliberately doesn't touch fullMap/itemMap here, even though we could
+// optimistically set the new value: persistDataSynced() fires
+// PERSISTED_DATA_CHANGED, which immediately re-runs the Keep -> SP pull
+// sync against state.json — but state.json is still stale at this point
+// (the daemon hasn't applied this pending change yet), so that pull would
+// see our fresh cache value vs. the stale file value, treat the file as
+// authoritative, and instantly revert the edit we just made. Leaving the
+// cache untouched means it still matches the equally-stale state.json, so
+// the pull diff is a no-op until the daemon actually applies this change
+// and re-writes a fresh state.json — at which point the normal pull-diff
+// logic reconciles the cache for free (redundant but harmless, since SP
+// already has the value by then).
 PluginAPI.registerHook(PluginAPI.Hooks.TASK_UPDATE, async ({ taskId, task, changes }) => {
   if (!changes || (!('title' in changes) && !('isDone' in changes))) return;
 
@@ -224,30 +284,7 @@ PluginAPI.registerHook(PluginAPI.Hooks.TASK_UPDATE, async ({ taskId, task, chang
   const cfg = await getConfig();
   if (!cfg) return;
 
-  try {
-    // Deliberately don't touch fullMap/itemMap here, even though we
-    // could optimistically set the new value: persistDataSynced() fires
-    // PERSISTED_DATA_CHANGED, which immediately re-runs the Keep -> SP
-    // pull sync against state.json — but state.json is still stale at
-    // this point (the daemon hasn't applied this pending change yet), so
-    // that pull would see our fresh cache value vs. the stale file value,
-    // treat the file as authoritative, and instantly revert the edit we
-    // just made. Leaving the cache untouched means it still matches the
-    // equally-stale state.json, so the pull diff is a no-op until the
-    // daemon actually applies this change and re-writes a fresh
-    // state.json — at which point the normal pull-diff logic reconciles
-    // the cache for free (redundant but harmless, since SP already has
-    // the value by then).
-    const nodeResult = await nodeApi.executeNodeScript({
-      script: buildQueueChangeScript(cfg.statePath, noteId, itemId, task.title, task.isDone),
-      timeout: 8000,
-    });
-    if (!nodeResult || !nodeResult.success) {
-      console.warn('[keep-list-sync] failed to queue SP -> Keep change', nodeResult);
-    }
-  } catch (e) {
-    console.warn('[keep-list-sync] failed to queue SP -> Keep change', e);
-  }
+  await queuePendingChange(cfg, noteId, itemId, task.title, task.isDone);
 });
 
 async function init() {
