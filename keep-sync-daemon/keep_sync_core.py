@@ -180,6 +180,50 @@ def apply_pending_changes(keep: "gkeepapi.Keep", pending: dict) -> int:
     return applied
 
 
+def load_pending_creates(pending_creates_path: Path) -> dict:
+    if not pending_creates_path.exists():
+        return {}
+    try:
+        with pending_creates_path.open("r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def apply_pending_creates(keep: "gkeepapi.Keep", pending_creates: dict) -> dict:
+    """Creates new Keep list items queued by the sp-plugin for tasks that
+    were created directly in Super Productivity (no matching Keep item).
+    pending_creates is keyed by note id, then by an opaque "task id" the
+    plugin supplied purely so it can map the result back to the SP task
+    that caused it — this module never interprets it. Returns
+    {task_id: {"noteId": ..., "itemId": ...}} for each item actually
+    created; a note that's gone missing since queued is skipped, not
+    fatal. Caller must still call keep.sync() to push the result."""
+    created = {}
+    for note_id, tasks in pending_creates.items():
+        note = keep.get(note_id)
+        if note is None or not isinstance(note, gkeepapi.node.List):
+            continue
+        for task_id, data in tasks.items():
+            item = note.add(data.get("text") or "", bool(data.get("checked")))
+            created[task_id] = {"noteId": note_id, "itemId": item.id}
+    return created
+
+
+def save_created_items(created_items_path: Path, new_entries: dict) -> None:
+    """Merge-writes newly created item mappings so a previous, not-yet
+    consumed by the plugin batch never gets clobbered."""
+    existing = {}
+    if created_items_path.exists():
+        try:
+            with created_items_path.open("r", encoding="utf-8") as fh:
+                existing = json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+    existing.update(new_entries)
+    atomic_write_json(created_items_path, existing, mode=0o644)
+
+
 def collect_checklists(keep: "gkeepapi.Keep", include_archived: bool) -> list:
     notes = []
     for note in keep.all():
@@ -222,6 +266,8 @@ def sync_once(cfg: dict) -> SyncResult:
     google_cache_path = state_dir / "google_sync_cache.json"
     output_path = state_dir / "state.json"
     pending_path = state_dir / "pending_changes.json"
+    pending_creates_path = state_dir / "pending_creates.json"
+    created_items_path = state_dir / "created_items.json"
 
     try:
         master_token = get_master_token(state_dir)
@@ -240,15 +286,35 @@ def sync_once(cfg: dict) -> SyncResult:
         keep.sync()
 
         pending = load_pending_changes(pending_path)
+        pending_creates = load_pending_creates(pending_creates_path)
+        needs_push = False
+
         if pending:
             applied = apply_pending_changes(keep, pending)
             log.info("applied %d pending Super Productivity edit(s)", applied)
-            if applied:
-                keep.sync()  # push the queued Super Productivity edits to Google
+            needs_push = needs_push or bool(applied)
+
+        created_items = {}
+        if pending_creates:
+            created_items = apply_pending_creates(keep, pending_creates)
+            log.info("created %d new Keep item(s) from Super Productivity tasks", len(created_items))
+            needs_push = needs_push or bool(created_items)
+
+        if needs_push:
+            keep.sync()  # push the queued Super Productivity edits/creates to Google
+
+        if pending:
             try:
                 pending_path.unlink()
             except OSError:
                 pass
+        if pending_creates:
+            try:
+                pending_creates_path.unlink()
+            except OSError:
+                pass
+        if created_items:
+            save_created_items(created_items_path, created_items)
     except gkeepapi.exception.LoginException as e:
         log.error("Google login failed", exc_info=True)
         return SyncResult(
