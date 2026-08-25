@@ -1,4 +1,4 @@
-name: Build tray apps
+name: Build tray app
 
 on:
   workflow_dispatch: {}
