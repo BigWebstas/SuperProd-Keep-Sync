@@ -1,0 +1,10 @@
+keep-sync-daemon/.venv/
+keep-sync-daemon/config.json
+keep-sync-daemon/__pycache__/
+*.pyc
+keep-list-sync.zip
+
+# Never commit local Keep state/tokens (but keep get_master_token.py, the helper script)
+.sp-keep-sync/
+master_token
+*/master_token

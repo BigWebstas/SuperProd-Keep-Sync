@@ -1,0 +1,25 @@
+{
+  "id": "keep-list-sync",
+  "name": "Google Keep List Sync",
+  "version": "1.0.0",
+  "description": "One-way sync of a Google Keep checklist into a Super Productivity project (desktop only; requires the keep-sync-daemon companion script).",
+  "manifestVersion": 1,
+  "minSupVersion": "14.0.0",
+  "icon": "icon.svg",
+  "iFrame": true,
+  "sidePanel": true,
+  "hooks": ["persistedDataChanged"],
+  "permissions": [
+    "addTask",
+    "updateTask",
+    "getAllProjects",
+    "persistDataSynced",
+    "loadSyncedData",
+    "showSnack",
+    "nodeExecution",
+    "executeNodeScript"
+  ],
+  "nodeScriptConfig": {
+    "timeout": 8000
+  }
+}
