@@ -41,6 +41,31 @@ function buildReadStateScript(customPath) {
   `;
 }
 
+function buildQueueChangeScript(customPath, noteId, itemId, text, checked) {
+  const dirExpr = customPath
+    ? `require('path').dirname(${JSON.stringify(customPath)})`
+    : "require('path').join(require('os').homedir(), '.sp-keep-sync')";
+  return `
+    const fs = require('fs');
+    const path = require('path');
+    const dir = ${dirExpr};
+    fs.mkdirSync(dir, { recursive: true });
+    const pendingPath = path.join(dir, 'pending_changes.json');
+    let pending = {};
+    try {
+      if (fs.existsSync(pendingPath)) {
+        pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
+      }
+    } catch (e) {}
+    const noteId = ${JSON.stringify(noteId)};
+    const itemId = ${JSON.stringify(itemId)};
+    pending[noteId] = pending[noteId] || {};
+    pending[noteId][itemId] = { text: ${JSON.stringify(text)}, checked: ${JSON.stringify(!!checked)} };
+    fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+    return { ok: true };
+  `;
+}
+
 async function getConfig() {
   const raw = await PluginAPI.loadSyncedData(CFG_KEY);
   return raw ? JSON.parse(raw) : null;
@@ -174,6 +199,49 @@ PluginAPI.registerHook(PluginAPI.Hooks.PERSISTED_DATA_CHANGED, async () => {
   const cfg = await getConfig();
   startLoop(cfg && cfg.intervalMinutes);
   await runSync();
+});
+
+// Queues checked/title edits made in SP for the keep-sync daemon to push
+// to Keep on its next cycle (it owns the only Keep-writing credentials —
+// this plugin can only shell out through Node's fs module). Only fires
+// for tasks this plugin created from a Keep item; other edits are ignored.
+PluginAPI.registerHook(PluginAPI.Hooks.TASK_UPDATE, async ({ taskId, task, changes }) => {
+  if (!changes || (!('title' in changes) && !('isDone' in changes))) return;
+
+  const fullMap = await getMap();
+  let noteId = null;
+  let itemId = null;
+  for (const nId of Object.keys(fullMap)) {
+    const foundItemId = Object.keys(fullMap[nId]).find((id) => fullMap[nId][id].taskId === taskId);
+    if (foundItemId) {
+      noteId = nId;
+      itemId = foundItemId;
+      break;
+    }
+  }
+  if (!noteId) return; // not a task we're tracking
+
+  const cfg = await getConfig();
+  if (!cfg) return;
+
+  try {
+    const nodeResult = await nodeApi.executeNodeScript({
+      script: buildQueueChangeScript(cfg.statePath, noteId, itemId, task.title, task.isDone),
+      timeout: 8000,
+    });
+    if (nodeResult && nodeResult.success) {
+      // Optimistically update our "last known" cache so the next Keep
+      // pull-diff cycle doesn't see a stale mismatch and push this value
+      // right back into SP before the daemon has applied it to Keep.
+      fullMap[noteId][itemId].text = task.title;
+      fullMap[noteId][itemId].checked = task.isDone;
+      await PluginAPI.persistDataSynced(JSON.stringify(fullMap), MAP_KEY);
+    } else {
+      console.warn('[keep-list-sync] failed to queue SP -> Keep change', nodeResult);
+    }
+  } catch (e) {
+    console.warn('[keep-list-sync] failed to queue SP -> Keep change', e);
+  }
 });
 
 async function init() {

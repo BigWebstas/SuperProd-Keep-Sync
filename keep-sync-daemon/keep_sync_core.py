@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """
-Shared logic behind both keep_sync_daemon.py (CLI, run via cron/systemd/Task
-Scheduler) and keep_sync_tray.py (Windows tray app with its own scheduler).
-Not meant to be run directly.
+Shared logic behind keep_sync_daemon.py (CLI, run via cron/systemd/Task
+Scheduler), keep_sync_tray.py (Windows tray app), and keep_sync_tray_qt.py
+(Linux/KDE tray app). Not meant to be run directly.
+
+Each sync pass is mostly Keep -> state.json, but also pushes queued
+Super Productivity edits back to Keep first: the sp-plugin writes item
+checked/text changes it observes to <state_dir>/pending_changes.json,
+and sync_once() applies + pushes those before re-reading Keep's now
+up-to-date state. See apply_pending_changes().
 """
 from __future__ import annotations
 
@@ -105,6 +111,40 @@ def load_google_state_cache(cache_path: Path):
         return None
 
 
+def load_pending_changes(pending_path: Path) -> dict:
+    if not pending_path.exists():
+        return {}
+    try:
+        with pending_path.open("r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def apply_pending_changes(keep: "gkeepapi.Keep", pending: dict) -> int:
+    """Applies queued Super Productivity -> Keep edits (checked/text,
+    written by the sp-plugin's TASK_UPDATE hook) to the in-memory Keep
+    graph. Returns how many item changes were applied; a note or item
+    that's gone missing since it was queued (e.g. trashed) is skipped,
+    not fatal. Caller must still call keep.sync() to push the result."""
+    applied = 0
+    for note_id, items in pending.items():
+        note = keep.get(note_id)
+        if note is None or not isinstance(note, gkeepapi.node.List):
+            continue
+        by_id = {item.id: item for item in note.items}
+        for item_id, change in items.items():
+            item = by_id.get(item_id)
+            if item is None:
+                continue
+            if change.get("text") is not None:
+                item.text = change["text"]
+            if change.get("checked") is not None:
+                item.checked = bool(change["checked"])
+            applied += 1
+    return applied
+
+
 def collect_checklists(keep: "gkeepapi.Keep", include_archived: bool) -> list:
     notes = []
     for note in keep.all():
@@ -143,6 +183,7 @@ def sync_once(cfg: dict) -> SyncResult:
 
     google_cache_path = state_dir / "google_sync_cache.json"
     output_path = state_dir / "state.json"
+    pending_path = state_dir / "pending_changes.json"
 
     try:
         master_token = get_master_token(state_dir)
@@ -158,6 +199,15 @@ def sync_once(cfg: dict) -> SyncResult:
         else:
             keep.authenticate(cfg["email"], master_token)
         keep.sync()
+
+        pending = load_pending_changes(pending_path)
+        if pending:
+            if apply_pending_changes(keep, pending):
+                keep.sync()  # push the queued Super Productivity edits to Google
+            try:
+                pending_path.unlink()
+            except OSError:
+                pass
     except gkeepapi.exception.LoginException as e:
         return SyncResult(
             False,

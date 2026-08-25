@@ -1,13 +1,16 @@
 # keep-sync-daemon
 
-Reads a Google Keep account via the unofficial [`gkeepapi`](https://github.com/kiwiz/gkeepapi)
-library and writes every checklist note (title + items + checked state) to a
-local JSON file at `<state_dir>/state.json` (default `~/.sp-keep-sync/state.json`).
+Talks to a Google Keep account via the unofficial [`gkeepapi`](https://github.com/kiwiz/gkeepapi)
+library. Each run: applies any checked/title edits the `sp-plugin` queued in
+`<state_dir>/pending_changes.json` (writing them to Keep), then writes every
+checklist note's current state (title + items + checked state) to
+`<state_dir>/state.json` (default `~/.sp-keep-sync/state.json`).
 
-This script is intentionally one-directional and read-only against Keep — it
-never writes back to Google. It's meant to run on a schedule (cron / systemd
-timer / Task Scheduler); the `sp-plugin` half of this project reads the JSON
-file it produces.
+It's meant to run on a schedule (cron / systemd timer / Task Scheduler, or
+one of the tray apps below, which schedule themselves); the `sp-plugin` half
+of this project reads `state.json` and writes `pending_changes.json`. New
+items and deletes never propagate in either direction — see the top-level
+README's constraints section for exactly what does and doesn't sync.
 
 ## Setup
 

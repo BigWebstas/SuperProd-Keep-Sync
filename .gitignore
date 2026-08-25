@@ -4,6 +4,11 @@ keep-sync-daemon/__pycache__/
 *.pyc
 keep-list-sync.zip
 
+# PyInstaller build output (see requirements-windows.txt / requirements-linux.txt)
+keep-sync-daemon/build/
+keep-sync-daemon/dist/
+keep-sync-daemon/*.spec
+
 # Never commit local Keep state/tokens (but keep get_master_token.py, the helper script)
 .sp-keep-sync/
 master_token
