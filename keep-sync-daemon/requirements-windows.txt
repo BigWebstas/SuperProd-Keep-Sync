@@ -1,0 +1,6 @@
+# Extra deps for the Windows tray app (keep_sync_tray.py) and building the
+# .exe. Not needed for the plain CLI daemon (keep_sync_daemon.py).
+-r requirements.txt
+pystray>=0.19.5
+Pillow>=10.0.0
+pyinstaller>=6.0.0

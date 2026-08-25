@@ -1,5 +1,6 @@
 {
   "email": "you@gmail.com",
   "state_dir": "~/.sp-keep-sync",
-  "include_archived": false
+  "include_archived": false,
+  "sync_interval_minutes": 5
 }
