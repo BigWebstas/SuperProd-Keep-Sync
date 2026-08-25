@@ -31,7 +31,7 @@ LOGGER_NAME = "keep_sync"
 
 def setup_logging(log_path: Path) -> logging.Logger:
     """Configures the shared "keep_sync" logger to write to log_path (a
-    1MB x 3 rotating file) and installs sys.excepthook /
+    10MB x 3 rotating file, 40MB ceiling) and installs sys.excepthook /
     threading.excepthook so uncaught exceptions get logged instead of
     vanishing — the tray apps are --windowed builds with no console, so a
     log file is the only place errors are visible at all."""
@@ -41,7 +41,7 @@ def setup_logging(log_path: Path) -> logging.Logger:
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(logging.INFO)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    handler = logging.handlers.RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    handler = logging.handlers.RotatingFileHandler(log_path, maxBytes=10_000_000, backupCount=3, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(threadName)s] %(message)s"))
     logger.addHandler(handler)
 
