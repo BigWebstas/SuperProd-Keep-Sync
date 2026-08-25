@@ -225,18 +225,24 @@ PluginAPI.registerHook(PluginAPI.Hooks.TASK_UPDATE, async ({ taskId, task, chang
   if (!cfg) return;
 
   try {
+    // Deliberately don't touch fullMap/itemMap here, even though we
+    // could optimistically set the new value: persistDataSynced() fires
+    // PERSISTED_DATA_CHANGED, which immediately re-runs the Keep -> SP
+    // pull sync against state.json — but state.json is still stale at
+    // this point (the daemon hasn't applied this pending change yet), so
+    // that pull would see our fresh cache value vs. the stale file value,
+    // treat the file as authoritative, and instantly revert the edit we
+    // just made. Leaving the cache untouched means it still matches the
+    // equally-stale state.json, so the pull diff is a no-op until the
+    // daemon actually applies this change and re-writes a fresh
+    // state.json — at which point the normal pull-diff logic reconciles
+    // the cache for free (redundant but harmless, since SP already has
+    // the value by then).
     const nodeResult = await nodeApi.executeNodeScript({
       script: buildQueueChangeScript(cfg.statePath, noteId, itemId, task.title, task.isDone),
       timeout: 8000,
     });
-    if (nodeResult && nodeResult.success) {
-      // Optimistically update our "last known" cache so the next Keep
-      // pull-diff cycle doesn't see a stale mismatch and push this value
-      // right back into SP before the daemon has applied it to Keep.
-      fullMap[noteId][itemId].text = task.title;
-      fullMap[noteId][itemId].checked = task.isDone;
-      await PluginAPI.persistDataSynced(JSON.stringify(fullMap), MAP_KEY);
-    } else {
+    if (!nodeResult || !nodeResult.success) {
       console.warn('[keep-list-sync] failed to queue SP -> Keep change', nodeResult);
     }
   } catch (e) {
