@@ -209,6 +209,51 @@ def run_setup_window(cfg: dict) -> dict | None:
     return window.result
 
 
+class StatusWindow(tk.Tk):
+    """Small status window opened by double-clicking the tray icon or via
+    its "Show status" menu entry. Runs on its own thread (see
+    TrayApp._show_status_window) since pystray's icon.run() already owns
+    the main thread."""
+
+    def __init__(self, app: "TrayApp"):
+        super().__init__()
+        self.app = app
+
+        self.title(APP_NAME)
+        self.resizable(False, False)
+
+        pad = {"padx": 10, "pady": 6}
+
+        tk.Label(self, text=f"Account: {app.cfg.get('email', '')}", anchor="w").grid(
+            row=0, column=0, columnspan=2, sticky="w", **pad
+        )
+
+        self.status_var = tk.StringVar()
+        tk.Label(self, textvariable=self.status_var, wraplength=340, justify="left", anchor="w").grid(
+            row=1, column=0, columnspan=2, sticky="w", **pad
+        )
+
+        tk.Button(self, text="Sync now", command=self._sync_now).grid(
+            row=2, column=0, padx=10, pady=10, sticky="ew"
+        )
+        tk.Button(self, text="Reconfigure…", command=self._reconfigure).grid(
+            row=2, column=1, padx=10, pady=10, sticky="ew"
+        )
+
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        self.status_var.set(self.app.status or "Waiting for the first sync...")
+        self.after(1000, self._refresh_status)
+
+    def _sync_now(self) -> None:
+        self.app._sync_now()
+
+    def _reconfigure(self) -> None:
+        self.destroy()
+        self.app._reconfigure()
+
+
 class TrayApp:
     def __init__(self, cfg: dict):
         import pystray
@@ -217,12 +262,15 @@ class TrayApp:
         self.pystray = pystray
         self.stop_event = threading.Event()
         self.reconfigure_requested = False
+        self.status = "Starting..."
+        self.status_window_open = threading.Event()
 
         self.icon = pystray.Icon(
             APP_NAME,
             make_icon_image(),
             f"{APP_NAME} — starting…",
             menu=pystray.Menu(
+                pystray.MenuItem("Show status", self._show_status_window, default=True),
                 pystray.MenuItem("Sync now", self._sync_now),
                 pystray.MenuItem("Open data folder", self._open_data_folder),
                 pystray.MenuItem("Reconfigure…", self._reconfigure),
@@ -231,6 +279,7 @@ class TrayApp:
         )
 
     def _set_status(self, text: str) -> None:
+        self.status = text
         self.icon.title = f"{APP_NAME} — {text}"[:127]  # Windows tooltip length limit
 
     def _run_sync(self) -> None:
@@ -251,6 +300,18 @@ class TrayApp:
         state_dir.mkdir(parents=True, exist_ok=True)
         if hasattr(os, "startfile"):
             os.startfile(state_dir)  # noqa: S606 — local, user-owned path
+
+    def _show_status_window(self, icon=None, item=None) -> None:
+        if self.status_window_open.is_set():
+            return  # already open — only one at a time
+        threading.Thread(target=self._run_status_window, daemon=True).start()
+
+    def _run_status_window(self) -> None:
+        self.status_window_open.set()
+        try:
+            StatusWindow(self).mainloop()
+        finally:
+            self.status_window_open.clear()
 
     def _reconfigure(self, icon=None, item=None) -> None:
         self.reconfigure_requested = True
@@ -278,13 +339,19 @@ def run_selftest() -> int:
     opening a visible window, touching config.json, or hitting the
     network. A real build can still look broken to a user even if this
     passes — it only catches packaging failures (missing hidden imports,
-    missing DLLs), not UX issues."""
-    import pystray  # noqa: F401 — import-only check that the backend loads
+    missing DLLs, bad pystray kwargs), not UX issues."""
+    import tempfile
 
     make_icon_image()
     root = tk.Tk()
     root.withdraw()
     root.destroy()
+
+    # Builds the real menu (incl. the default/double-click item) without
+    # calling icon.run(), which would block waiting for a live tray.
+    with tempfile.TemporaryDirectory() as tmp:
+        TrayApp({"email": "selftest@example.com", "state_dir": tmp})
+
     print("SELFTEST OK")
     return 0
 
