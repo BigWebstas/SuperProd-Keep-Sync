@@ -9,7 +9,9 @@ missing, mis-themed, or the menu can behave oddly. QSystemTrayIcon talks
 StatusNotifierItem natively, so this gives a proper native tray icon
 under Plasma. Functionally this is the same app as keep_sync_tray.py
 (Windows): a one-time setup window for email + OAuth Token, then a tray
-icon that re-syncs Keep to state.json on its own timer.
+icon that re-syncs on its own timer — pulling Keep's state to state.json,
+and pushing any Super Productivity edits queued in pending_changes.json
+back to Keep (see keep_sync_core.sync_once).
 
 Packaging into a standalone Linux binary (see README.md):
     pyinstaller --onefile --name KeepSyncTrayQt keep_sync_tray_qt.py

@@ -5,8 +5,10 @@ Windows system-tray app for keep-sync-daemon.
 On first launch it shows a small setup window: enter your Google account
 email and an OAuth Token (see README.md for how to get one), and it
 exchanges that for a Keep master token and stores it locally — no terminal
-required. After that it sits in the tray and re-syncs Keep to state.json on
-its own timer for as long as it's running.
+required. After that it sits in the tray and re-syncs on its own timer for
+as long as it's running: pulling Keep's state to state.json, and pushing
+any Super Productivity edits queued in pending_changes.json back to Keep
+(see keep_sync_core.sync_once).
 
 This is the GUI/packaged alternative to keep_sync_daemon.py, which is
 meant to be invoked by an external scheduler (cron/systemd timer/Task
