@@ -1,0 +1,6 @@
+# Extra deps for the Linux/KDE tray app (keep_sync_tray_qt.py) and building
+# its binary. Not needed for the plain CLI daemon (keep_sync_daemon.py) or
+# the Windows tray app (which uses pystray/tkinter instead of Qt).
+-r requirements.txt
+PySide6>=6.5.0
+pyinstaller>=6.0.0

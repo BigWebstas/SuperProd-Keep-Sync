@@ -51,7 +51,9 @@
     <h1>Google Keep List Sync</h1>
     <p class="text-muted">
       Picks a Keep checklist (produced by the keep-sync-daemon companion
-      script) and syncs its items into a Super Productivity project.
+      script) and syncs its items with a Super Productivity project.
+      Checking off or renaming an item on either side updates the other;
+      new items only flow Keep → SP.
     </p>
 
     <label for="noteSelect">Keep list</label>
@@ -133,11 +135,17 @@
       }
 
       async function loadProjects() {
-        const projects = await PluginAPI.getAllProjects();
-        const active = projects.filter((p) => !p.isArchived);
-        projectSelect.innerHTML = active
-          .map((p) => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.title)}</option>`)
-          .join('');
+        projectSelect.innerHTML = '<option value="">Loading…</option>';
+        try {
+          const projects = await PluginAPI.getAllProjects();
+          const active = projects.filter((p) => !p.isArchived);
+          projectSelect.innerHTML = active
+            .map((p) => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.title)}</option>`)
+            .join('');
+        } catch (e) {
+          projectSelect.innerHTML = '<option value="">(error loading projects)</option>';
+          console.error('[keep-list-sync] loadProjects failed', e);
+        }
       }
 
       async function loadConfig() {
@@ -170,17 +178,51 @@
         return escapeHtml(s);
       }
 
+      function showInitError(e) {
+        noteSelect.innerHTML = '<option value="">(failed to load — see console)</option>';
+        statusBox.textContent = `Plugin failed to initialize: ${(e && e.message) || e}`;
+        statusBox.className = 'card err';
+        console.error('[keep-list-sync] init failed', e);
+      }
+
+      // On some Super Productivity builds the window.PluginAPI bridge is
+      // injected into the iframe body after this inline script has already
+      // run (host issue #9526: the bridge script tag lands after ours in
+      // parse order), so `PluginAPI` can be a ReferenceError at the top of
+      // this file even though it appears moments later. Poll for it instead
+      // of assuming it's there.
+      function waitForPluginApi(timeoutMs) {
+        return new Promise((resolve, reject) => {
+          const start = Date.now();
+          (function check() {
+            if (typeof window.PluginAPI !== 'undefined') {
+              resolve();
+              return;
+            }
+            if (Date.now() - start > timeoutMs) {
+              reject(new Error('PluginAPI was never injected into this iframe (a known issue on some Super Productivity builds — try updating the app).'));
+              return;
+            }
+            setTimeout(check, 50);
+          })();
+        });
+      }
+
       async function init() {
-        const cfg = await loadConfig();
-        statePathInput.value = cfg.statePath || '';
-        intervalInput.value = cfg.intervalMinutes || 5;
+        try {
+          const cfg = await loadConfig();
+          statePathInput.value = cfg.statePath || '';
+          intervalInput.value = cfg.intervalMinutes || 5;
 
-        await Promise.all([loadNotes(cfg.statePath), loadProjects()]);
+          await Promise.all([loadNotes(cfg.statePath), loadProjects()]);
 
-        if (cfg.noteTitle) noteSelect.value = cfg.noteTitle;
-        if (cfg.projectId) projectSelect.value = cfg.projectId;
+          if (cfg.noteTitle) noteSelect.value = cfg.noteTitle;
+          if (cfg.projectId) projectSelect.value = cfg.projectId;
 
-        await loadStatus();
+          await loadStatus();
+        } catch (e) {
+          showInitError(e);
+        }
       }
 
       document.getElementById('saveBtn').addEventListener('click', async () => {
@@ -207,7 +249,7 @@
         setTimeout(loadStatus, 1500);
       });
 
-      init();
+      waitForPluginApi(5000).then(init).catch(showInitError);
     </script>
   </body>
 </html>

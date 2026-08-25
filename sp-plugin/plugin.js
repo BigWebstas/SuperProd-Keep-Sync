@@ -41,6 +41,107 @@ function buildReadStateScript(customPath) {
   `;
 }
 
+function buildQueueChangeScript(customPath, noteId, itemId, text, checked) {
+  const dirExpr = customPath
+    ? `require('path').dirname(${JSON.stringify(customPath)})`
+    : "require('path').join(require('os').homedir(), '.sp-keep-sync')";
+  return `
+    const fs = require('fs');
+    const path = require('path');
+    const dir = ${dirExpr};
+    fs.mkdirSync(dir, { recursive: true });
+    const pendingPath = path.join(dir, 'pending_changes.json');
+    let pending = {};
+    try {
+      if (fs.existsSync(pendingPath)) {
+        pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
+      }
+    } catch (e) {}
+    const noteId = ${JSON.stringify(noteId)};
+    const itemId = ${JSON.stringify(itemId)};
+    pending[noteId] = pending[noteId] || {};
+    pending[noteId][itemId] = { text: ${JSON.stringify(text)}, checked: ${JSON.stringify(!!checked)} };
+    fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+    return { ok: true };
+  `;
+}
+
+// taskId here is just an opaque key the daemon echoes back in
+// created_items.json once it's actually created the Keep item — it never
+// interprets it as anything Keep-specific.
+function buildQueueCreateScript(customPath, noteId, taskId, text, checked) {
+  const dirExpr = customPath
+    ? `require('path').dirname(${JSON.stringify(customPath)})`
+    : "require('path').join(require('os').homedir(), '.sp-keep-sync')";
+  return `
+    const fs = require('fs');
+    const path = require('path');
+    const dir = ${dirExpr};
+    fs.mkdirSync(dir, { recursive: true });
+    const pendingPath = path.join(dir, 'pending_creates.json');
+    let pending = {};
+    try {
+      if (fs.existsSync(pendingPath)) {
+        pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
+      }
+    } catch (e) {}
+    const noteId = ${JSON.stringify(noteId)};
+    const taskId = ${JSON.stringify(taskId)};
+    pending[noteId] = pending[noteId] || {};
+    pending[noteId][taskId] = { text: ${JSON.stringify(text)}, checked: ${JSON.stringify(!!checked)} };
+    fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+    return { ok: true };
+  `;
+}
+
+function buildReadCreatedItemsScript(customPath) {
+  const dirExpr = customPath
+    ? `require('path').dirname(${JSON.stringify(customPath)})`
+    : "require('path').join(require('os').homedir(), '.sp-keep-sync')";
+  return `
+    const fs = require('fs');
+    const path = require('path');
+    const filePath = path.join(${dirExpr}, 'created_items.json');
+    if (!fs.existsSync(filePath)) {
+      return { ok: true, data: {} };
+    }
+    try {
+      return { ok: true, data: JSON.parse(fs.readFileSync(filePath, 'utf8')) };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  `;
+}
+
+// Removes just the given keys (rather than deleting/overwriting the whole
+// file) so a batch the daemon writes between our read and this clear call
+// never gets lost.
+function buildClearCreatedItemsScript(customPath, taskIds) {
+  const dirExpr = customPath
+    ? `require('path').dirname(${JSON.stringify(customPath)})`
+    : "require('path').join(require('os').homedir(), '.sp-keep-sync')";
+  return `
+    const fs = require('fs');
+    const path = require('path');
+    const filePath = path.join(${dirExpr}, 'created_items.json');
+    if (!fs.existsSync(filePath)) {
+      return { ok: true };
+    }
+    try {
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      for (const id of ${JSON.stringify(taskIds)}) delete data[id];
+      if (Object.keys(data).length === 0) {
+        fs.unlinkSync(filePath);
+      } else {
+        fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  `;
+}
+
 async function getConfig() {
   const raw = await PluginAPI.loadSyncedData(CFG_KEY);
   return raw ? JSON.parse(raw) : null;
@@ -53,6 +154,41 @@ async function getMap() {
 
 async function setStatus(status) {
   await PluginAPI.persistDataSynced(JSON.stringify(status), STATUS_KEY);
+}
+
+// Queues a checked/title edit for the keep-sync daemon to push to Keep on
+// its next cycle (it owns the only Keep-writing credentials — this plugin
+// can only shell out through Node's fs module). Deliberately doesn't touch
+// itemMap: see the long comment on the TASK_UPDATE hook below for why.
+async function queuePendingChange(cfg, noteId, itemId, text, checked) {
+  try {
+    const nodeResult = await nodeApi.executeNodeScript({
+      script: buildQueueChangeScript(cfg.statePath, noteId, itemId, text, checked),
+      timeout: 8000,
+    });
+    if (!nodeResult || !nodeResult.success) {
+      console.warn('[keep-list-sync] failed to queue SP -> Keep change', nodeResult);
+    }
+  } catch (e) {
+    console.warn('[keep-list-sync] failed to queue SP -> Keep change', e);
+  }
+}
+
+// Queues a brand-new Keep item for a task that was created directly in SP
+// (no matching noteMap entry). The daemon reports back which Keep item id
+// it assigned via created_items.json — see the consume step in runSync().
+async function queuePendingCreate(cfg, noteId, taskId, text, checked) {
+  try {
+    const nodeResult = await nodeApi.executeNodeScript({
+      script: buildQueueCreateScript(cfg.statePath, noteId, taskId, text, checked),
+      timeout: 8000,
+    });
+    if (!nodeResult || !nodeResult.success) {
+      console.warn('[keep-list-sync] failed to queue SP -> Keep create', nodeResult);
+    }
+  } catch (e) {
+    console.warn('[keep-list-sync] failed to queue SP -> Keep create', e);
+  }
 }
 
 async function runSync() {
@@ -103,6 +239,46 @@ async function runSync() {
     let created = 0;
     let updated = 0;
 
+    // Single live-state snapshot reused below by the created_items.json
+    // consume step, the reconciliation diff, and the new-task scan — all
+    // three need "what does SP actually have right now", just for
+    // different purposes.
+    const state = await PluginAPI.getAppState();
+
+    // Consume any Keep items the daemon has finished creating on our
+    // behalf (see the new-task scan at the bottom of this function) before
+    // the Keep -> SP loop below runs. Order matters: if we mapped this
+    // item into noteMap first, that loop takes the "update" branch for it
+    // (a harmless no-op diff) instead of creating a *second*, duplicate SP
+    // task for a Keep item that only exists because of an SP task.
+    try {
+      const readResult = await nodeApi.executeNodeScript({
+        script: buildReadCreatedItemsScript(cfg.statePath),
+        timeout: 8000,
+      });
+      if (readResult && readResult.success && readResult.result && readResult.result.ok) {
+        const consumedTaskIds = [];
+        for (const [taskId, info] of Object.entries(readResult.result.data || {})) {
+          if (info.noteId !== note.id || noteMap[info.itemId]) continue;
+          const liveTask = state.tasks[taskId];
+          noteMap[info.itemId] = {
+            taskId,
+            text: liveTask ? liveTask.title : '',
+            checked: liveTask ? liveTask.isDone : false,
+          };
+          consumedTaskIds.push(taskId);
+        }
+        if (consumedTaskIds.length > 0) {
+          await nodeApi.executeNodeScript({
+            script: buildClearCreatedItemsScript(cfg.statePath, consumedTaskIds),
+            timeout: 8000,
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('[keep-list-sync] failed to consume created_items.json', e);
+    }
+
     for (const item of note.items) {
       const entry = noteMap[item.id];
       if (entry && entry.taskId) {
@@ -132,6 +308,42 @@ async function runSync() {
           console.warn('[keep-list-sync] failed to create task for item', item.id, e);
         }
       }
+    }
+
+    // Safety net alongside the TASK_UPDATE hook below: SP's own
+    // cross-device sync delivers remote changes (from other desktops
+    // running this same SP project) through a bulk-import/hydrate path
+    // that never dispatches the granular updateTask action the hook
+    // listens for, so those edits would otherwise never reach Keep. A
+    // full diff against live task state on every cycle catches them
+    // regardless of how the change actually arrived.
+    try {
+      for (const itemId of Object.keys(noteMap)) {
+        const entry = noteMap[itemId];
+        if (!entry.taskId) continue;
+        const liveTask = state.tasks[entry.taskId];
+        if (!liveTask) continue; // deleted in SP — deletes don't propagate (see README)
+        if (liveTask.title !== entry.text || liveTask.isDone !== entry.checked) {
+          await queuePendingChange(cfg, note.id, itemId, liveTask.title, liveTask.isDone);
+        }
+      }
+    } catch (e) {
+      console.warn('[keep-list-sync] failed to reconcile local task changes', e);
+    }
+
+    // New tasks created directly in SP (not from Keep): any task in the
+    // target project we have no noteMap entry for gets a new Keep item
+    // queued. Skips subtasks (parentId set) — Keep has no subtask concept,
+    // and the Keep -> SP direction only ever creates flat items too (see
+    // "Flat items only" in the top-level README).
+    try {
+      const trackedTaskIds = new Set(Object.values(noteMap).map((entry) => entry.taskId));
+      for (const task of Object.values(state.tasks)) {
+        if (task.projectId !== cfg.projectId || task.parentId || trackedTaskIds.has(task.id)) continue;
+        await queuePendingCreate(cfg, note.id, task.id, task.title, task.isDone);
+      }
+    } catch (e) {
+      console.warn('[keep-list-sync] failed to queue new SP -> Keep item(s)', e);
     }
 
     fullMap[note.id] = noteMap;
@@ -174,6 +386,46 @@ PluginAPI.registerHook(PluginAPI.Hooks.PERSISTED_DATA_CHANGED, async () => {
   const cfg = await getConfig();
   startLoop(cfg && cfg.intervalMinutes);
   await runSync();
+});
+
+// Fast path for locally-made edits (near-instant, vs. waiting for the next
+// polling cycle) — only fires for tasks this plugin created from a Keep
+// item; other edits are ignored. This does NOT catch edits delivered via
+// SP's own cross-device sync (see the reconciliation pass in runSync()
+// above, which exists specifically to also catch those).
+//
+// Deliberately doesn't touch fullMap/itemMap here, even though we could
+// optimistically set the new value: persistDataSynced() fires
+// PERSISTED_DATA_CHANGED, which immediately re-runs the Keep -> SP pull
+// sync against state.json — but state.json is still stale at this point
+// (the daemon hasn't applied this pending change yet), so that pull would
+// see our fresh cache value vs. the stale file value, treat the file as
+// authoritative, and instantly revert the edit we just made. Leaving the
+// cache untouched means it still matches the equally-stale state.json, so
+// the pull diff is a no-op until the daemon actually applies this change
+// and re-writes a fresh state.json — at which point the normal pull-diff
+// logic reconciles the cache for free (redundant but harmless, since SP
+// already has the value by then).
+PluginAPI.registerHook(PluginAPI.Hooks.TASK_UPDATE, async ({ taskId, task, changes }) => {
+  if (!changes || (!('title' in changes) && !('isDone' in changes))) return;
+
+  const fullMap = await getMap();
+  let noteId = null;
+  let itemId = null;
+  for (const nId of Object.keys(fullMap)) {
+    const foundItemId = Object.keys(fullMap[nId]).find((id) => fullMap[nId][id].taskId === taskId);
+    if (foundItemId) {
+      noteId = nId;
+      itemId = foundItemId;
+      break;
+    }
+  }
+  if (!noteId) return; // not a task we're tracking
+
+  const cfg = await getConfig();
+  if (!cfg) return;
+
+  await queuePendingChange(cfg, noteId, itemId, task.title, task.isDone);
 });
 
 async function init() {

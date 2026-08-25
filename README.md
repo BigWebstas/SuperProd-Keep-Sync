@@ -1,38 +1,42 @@
 # SuperProd Keep Sync
 
-One-way sync of a Google Keep checklist into a project in
+Two-way sync between a Google Keep checklist and a project in
 [Super Productivity](https://super-productivity.com) — pick the Keep list and
 the target project from a dropdown inside a Super Productivity plugin.
-Checking an item off in Keep marks the matching task done in Super
-Productivity; items are otherwise create-only (deleting an item in Keep does
-not delete its SP task).
+Checking off or renaming an item on either side updates the other. New items
+only flow one direction, Keep → SP (see the constraints below).
 
 ## Why two parts
 
 Google Keep has no public API for personal accounts, and Super Productivity
 plugins run in a sandbox that cannot make network calls to `localhost` or
-embed Python. So this is two pieces bridged by a local JSON file:
+embed Python. So this is two pieces bridged by two small local JSON files:
 
 ```
-┌─────────────────────────┐        ┌───────────────────────────┐
-│ keep-sync-daemon         │        │ sp-plugin                  │
-│ (Python, gkeepapi)       │        │ (runs inside SP, Electron  │
-│                           │  writes │ desktop only)              │
-│ cron/timer → polls Keep  │───────▶│ state.json → reads via     │
-│ → ~/.sp-keep-sync/       │        │ executeNodeScript, then    │
-│    state.json            │        │ PluginAPI.addTask/updateTask│
-└─────────────────────────┘        └───────────────────────────┘
+┌─────────────────────────┐                  ┌───────────────────────────┐
+│ keep-sync-daemon         │                  │ sp-plugin                  │
+│ (Python, gkeepapi)       │                  │ (runs inside SP, Electron  │
+│                           │──── writes ────▶│ desktop only)              │
+│ cron/timer → polls Keep  │   state.json     │ state.json → reads via     │
+│ → applies pending_       │                  │ executeNodeScript, then    │
+│   changes.json to Keep,  │◀─── writes ──────│ PluginAPI.addTask/updateTask│
+│   then re-reads Keep     │ pending_changes  │ TASK_UPDATE hook → queues  │
+│ → ~/.sp-keep-sync/*.json │      .json       │ edited items to that file  │
+└─────────────────────────┘                  └───────────────────────────┘
 ```
 
 - **keep-sync-daemon/** — a Python script using the unofficial `gkeepapi`
-  library, run on a schedule outside Super Productivity, that dumps every
-  Keep checklist note to `~/.sp-keep-sync/state.json`.
+  library, run on a schedule outside Super Productivity. Each pass first
+  applies any queued Super Productivity edits (`pending_changes.json`) to
+  Keep, then dumps every Keep checklist note to `~/.sp-keep-sync/state.json`.
 - **sp-plugin/** — a Super Productivity plugin. Its UI (a picker for the
   Keep list + target project) runs as an iframe; its background sync loop
   runs as `plugin.js` so it keeps polling even while that UI isn't open. It
   reads `state.json` via SP's `executeNodeScript` (the only way a plugin can
   touch the filesystem) and creates/updates tasks through the normal
-  `PluginAPI.addTask` / `updateTask` calls.
+  `PluginAPI.addTask` / `updateTask` calls. It also listens for the
+  `TASK_UPDATE` hook and writes checked/title edits made in SP to
+  `pending_changes.json` for the daemon to pick up on its next cycle.
 
 See each subfolder's README for setup specifics.
 
@@ -61,10 +65,13 @@ See each subfolder's README for setup specifics.
   mobile API. It can break without notice, and login occasionally gets
   challenged by Google (especially on 2FA accounts) — see the daemon
   README's troubleshooting section.
-- **One-way, no deletes.** Removing an item in Keep does not remove or
-  complete its SP task; this avoids a background sync loop making
-  destructive changes to your Super Productivity project. New/checked items
-  flow Keep → SP only.
+- **Checked/renamed items sync both ways; new items and deletes don't.**
+  Checking off or renaming an item flows in whichever direction it happened.
+  But a new item added directly in Keep creates a matching SP task, while a
+  new task added directly in SP does **not** create a matching Keep item —
+  and removing an item/task on either side never removes or completes its
+  counterpart. Both are deliberate: they keep this from ever making a
+  destructive or surprising change on either side of a background sync loop.
 - **Flat items only (v1).** Indented/nested Keep checklist sub-items are
   synced as flat, independent tasks — no SP subtask hierarchy is inferred
   from Keep's indentation, to keep the first version simple.
