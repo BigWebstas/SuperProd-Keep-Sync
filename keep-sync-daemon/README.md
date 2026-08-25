@@ -109,7 +109,11 @@ startup box (or re-pointing the shortcut) once.
    `get_master_token.py`), saves it to `<state_dir>/master_token`, and
    drops into the tray.
 
-Once running, the tray icon's right-click menu has:
+Once running, double-click the tray icon (or right-click for the full menu)
+to open a small status window with the account email, the last sync
+result, and **Sync now** / **Reconfigure…** buttons. The right-click menu
+itself has:
+- **Show status** — same window as double-click.
 - **Sync now** — runs an out-of-band sync immediately.
 - **Open data folder** — opens `state_dir` (where `state.json` lives) in
   Explorer.
@@ -120,6 +124,41 @@ Once running, the tray icon's right-click menu has:
 The tray icon's tooltip shows the outcome of the last sync; a failed sync
 also raises a Windows notification and, as with the CLI daemon, never
 touches the previous `state.json`.
+
+## Linux/KDE: system-tray app (Qt, native Plasma tray)
+
+`keep_sync_tray_qt.py` is the same app as `keep_sync_tray.py` above, built
+on Qt (PySide6) instead of pystray/tkinter. Use this on Linux instead of
+the pystray-based script — pystray's Linux backend (GTK/AppIndicator)
+often doesn't integrate cleanly with KDE Plasma's tray (missing/mis-themed
+icons, odd menu behavior); `QSystemTrayIcon` speaks Plasma's
+StatusNotifierItem protocol natively.
+
+Run it from source:
+```bash
+pip install -r requirements-linux.txt
+python keep_sync_tray_qt.py
+```
+
+Or build a standalone binary:
+```bash
+pip install -r requirements-linux.txt
+pyinstaller --onefile --name KeepSyncTrayQt keep_sync_tray_qt.py
+```
+The binary is written to `dist/KeepSyncTrayQt`. As with the Windows exe,
+`config.json` and the autostart entry are written next to wherever the
+binary lives.
+
+Setup, the tray menu (Show status / Sync now / Open data folder /
+Reconfigure… / Quit), and the status window are all the same as the
+Windows version above — same OAuth Token flow, same `keep_sync_core.py`
+sync logic. "Start automatically" writes an XDG autostart entry to
+`~/.config/autostart/keep-sync-tray.desktop` instead of a registry key.
+
+One caveat: double-click-to-open-status isn't guaranteed on every Linux
+desktop — some tray implementations (including Plasma, depending on
+version) don't reliably distinguish single vs. double clicks over
+StatusNotifierItem. Right-click → **Show status** always works regardless.
 
 ## Scheduling (CLI daemon)
 
