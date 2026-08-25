@@ -33,6 +33,13 @@ it accordingly (see storage options below).
    Google embedded-setup sign-in page yourself (not something this repo
    automates, since it changes without notice and actively resists
    automation).
+   1. Go to <https://accounts.google.com/EmbeddedSetup> and log into the
+      Google account you're syncing.
+   2. Click "I agree" when prompted. The page may then show a loading
+      screen forever — that's expected, ignore it.
+   3. Open your browser's dev tools (F12) → Application/Storage → Cookies
+      → `accounts.google.com`, and copy the value of the `oauth_token`
+      cookie. That value is what this repo calls the OAuth Token.
    - **If your account has 2-Step Verification enabled**, this flow commonly
      fails outright. The common workaround is to temporarily disable 2FA,
      mint the token, then re-enable 2FA — a real tradeoff you should decide

@@ -117,9 +117,10 @@ class SetupWindow(tk.Tk):
 
         info = (
             "Google Keep has no public API, so this connects the same way\n"
-            "the Android app does: sign in through Google's embedded\n"
-            "sign-in flow to get an OAuth Token, then paste it below.\n"
-            "Full steps are in README.md."
+            "the Android app does. To get an OAuth Token: open\n"
+            "accounts.google.com/EmbeddedSetup in a browser, sign in, then\n"
+            "copy the 'oauth_token' cookie's value (dev tools > Application\n"
+            "> Cookies) and paste it below. Full steps are in README.md."
         )
         tk.Label(self, text=info, justify="left").grid(row=0, column=0, columnspan=2, **pad)
 
