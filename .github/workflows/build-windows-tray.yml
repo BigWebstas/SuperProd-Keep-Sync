@@ -20,12 +20,19 @@ jobs:
         run: pip install -r requirements-windows.txt
 
       - name: Build exe
-        run: pyinstaller --onefile --windowed --name KeepSyncTray keep_sync_tray.py
+        run: >-
+          pyinstaller --onefile --windowed --name KeepSyncTray
+          --copy-metadata gpsoauth --copy-metadata gkeepapi
+          keep_sync_tray.py
 
       - name: Self-test the built exe
         env:
           KEEP_SYNC_TRAY_SELFTEST: "1"
-        run: .\dist\KeepSyncTray.exe
+        run: |
+          .\dist\KeepSyncTray.exe
+          if ($LASTEXITCODE -ne 0) {
+            throw "KeepSyncTray.exe self-test exited with code $LASTEXITCODE"
+          }
 
       - uses: actions/upload-artifact@v4
         with:
