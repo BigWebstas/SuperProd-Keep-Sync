@@ -178,5 +178,26 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(sp.calls, [])
 
 
+class RowShapeTests(unittest.TestCase):
+    """sp_client._rows: the response shapes the Local REST API might use
+    (a bare list, a keyed list, an entity map)."""
+
+    def test_bare_list(self):
+        self.assertEqual(sp_client.SPClient._rows([{"id": "a"}, {"id": "b"}], "x"),
+                         [{"id": "a"}, {"id": "b"}])
+
+    def test_keyed_list(self):
+        self.assertEqual(sp_client.SPClient._rows({"tasks": [{"id": "a"}]}, "tasks"),
+                         [{"id": "a"}])
+
+    def test_entity_map(self):
+        rows = sp_client.SPClient._rows({"a": {"id": "a"}, "b": {"id": "b"}}, "tasks")
+        self.assertEqual(sorted(r["id"] for r in rows), ["a", "b"])
+
+    def test_none_and_junk(self):
+        self.assertEqual(sp_client.SPClient._rows(None, "x"), [])
+        self.assertEqual(sp_client.SPClient._rows("nope", "x"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

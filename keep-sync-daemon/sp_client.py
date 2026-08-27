@@ -97,15 +97,27 @@ class SPClient:
                 "Super Productivity rejected the access token (401). Copy a "
                 "fresh one from Settings -> Misc -> Access Token."
             )
+
+        payload = None
+        if resp.content:
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = None
+
+        # The Local REST API wraps every response as
+        # {"ok": true, "data": ...} or {"ok": false, "error": {...}}.
+        if isinstance(payload, dict) and "ok" in payload:
+            if not payload.get("ok"):
+                err = payload.get("error") or {}
+                msg = err.get("message") if isinstance(err, dict) else str(err)
+                raise SPError(f"{method} {path}: {msg or 'request failed'}")
+            return payload.get("data")
+
         if not resp.ok:
             body = (resp.text or "").strip()
             raise SPError(f"{method} {path} failed: HTTP {resp.status_code} {body[:200]}")
-        if not resp.content:
-            return None
-        try:
-            return resp.json()
-        except ValueError as e:
-            raise SPError(f"{method} {path}: response was not JSON") from e
+        return payload
 
     def health(self) -> bool:
         """True if the API answers /health at all (no auth needed)."""
@@ -115,26 +127,46 @@ class SPClient:
         except requests.RequestException:
             return False
 
+    @staticmethod
+    def _rows(data, key: str) -> list[dict]:
+        """Normalize the shapes the Local REST API might return: a bare
+        list, {"<key>": [...]}, or an NgRx-style {id: {...}} entity map."""
+        if data is None:
+            return []
+        if isinstance(data, list):
+            return [r for r in data if isinstance(r, dict)]
+        if isinstance(data, dict):
+            inner = data.get(key)
+            if isinstance(inner, list):
+                return [r for r in inner if isinstance(r, dict)]
+            if isinstance(inner, dict):
+                return [r for r in inner.values() if isinstance(r, dict)]
+            if isinstance(data.get("entities"), dict):
+                return [r for r in data["entities"].values() if isinstance(r, dict)]
+            return [v for v in data.values() if isinstance(v, dict)]
+        return []
+
     def list_projects(self) -> list[SPProject]:
-        data = self._request("GET", "/projects") or []
-        rows = data.get("projects", data) if isinstance(data, dict) else data
-        return [SPProject.from_json(p) for p in rows]
+        data = self._request("GET", "/projects")
+        return [SPProject.from_json(p) for p in self._rows(data, "projects")]
 
     def list_tasks(self, project_id: str, include_done: bool = True, source: str = "active") -> list[SPTask]:
         params = {"projectId": project_id, "source": source}
         if include_done:
             params["includeDone"] = "true"
-        data = self._request("GET", "/tasks", params=params) or []
-        rows = data.get("tasks", data) if isinstance(data, dict) else data
-        return [SPTask.from_json(t) for t in rows]
+        data = self._request("GET", "/tasks", params=params)
+        return [SPTask.from_json(t) for t in self._rows(data, "tasks")]
 
     def add_task(self, title: str, project_id: str, is_done: bool = False) -> str:
         payload = {"title": title, "projectId": project_id, "isDone": bool(is_done)}
-        data = self._request("POST", "/tasks", json=payload) or {}
-        task_id = data.get("id") or data.get("taskId") or (data.get("task") or {}).get("id")
-        if not task_id:
-            raise SPError(f"POST /tasks did not return a task id (got {data!r})")
-        return task_id
+        data = self._request("POST", "/tasks", json=payload)
+        if isinstance(data, str):
+            return data
+        if isinstance(data, dict):
+            task_id = data.get("id") or data.get("taskId") or (data.get("task") or {}).get("id")
+            if task_id:
+                return task_id
+        raise SPError(f"POST /tasks did not return a task id (got {data!r})")
 
     def update_task(self, task_id: str, patch: dict) -> None:
         self._request("PATCH", f"/tasks/{task_id}", json=patch)
