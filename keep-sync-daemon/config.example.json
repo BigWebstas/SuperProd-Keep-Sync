@@ -2,5 +2,9 @@
   "email": "you@gmail.com",
   "state_dir": "~/.sp-keep-sync",
   "include_archived": false,
-  "sync_interval_minutes": 5
+  "sync_interval_minutes": 5,
+  "sp_api_base_url": "http://127.0.0.1:3876",
+  "sp_access_token": "paste from SP Settings -> Misc -> Access Token",
+  "sp_project_id": "the target SP project id (GET /projects lists them)",
+  "keep_note_title": "the exact title of the Keep checklist to sync"
 }

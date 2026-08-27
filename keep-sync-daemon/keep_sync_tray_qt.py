@@ -32,6 +32,7 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QGridLayout,
     QLabel,
@@ -66,6 +67,10 @@ def default_config() -> dict:
         "include_archived": False,
         "sync_interval_minutes": core.DEFAULT_SYNC_INTERVAL_MINUTES,
         "run_at_startup": False,
+        "sp_api_base_url": core.DEFAULT_SP_API_BASE_URL,
+        "sp_access_token": "",
+        "sp_project_id": "",
+        "keep_note_title": "",
     }
 
 
@@ -80,6 +85,8 @@ def load_or_default_config() -> dict:
 
 def needs_setup(cfg: dict) -> bool:
     if not cfg.get("email"):
+        return True
+    if not (cfg.get("sp_access_token") and cfg.get("sp_project_id") and cfg.get("keep_note_title")):
         return True
     state_dir = core.resolve_state_dir(cfg.get("state_dir", core.DEFAULT_STATE_DIR))
     return not (state_dir / "master_token").exists()
@@ -128,87 +135,187 @@ def make_icon() -> QIcon:
 
 
 class SetupDialog(QDialog):
-    """Collects email + OAuth Token, exchanges it for a master token, and
-    saves config.json. `result_cfg` is the finished config on success, or
-    None if the dialog was closed without finishing."""
+    """Collects the Google + Super Productivity credentials, then (via the
+    "Connect & load lists" button) fetches the Keep checklists and SP
+    projects to pick from. `result_cfg` is the finished config on success,
+    or None if the dialog was closed without finishing."""
 
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
         self.cfg = dict(cfg)
         self.result_cfg: dict | None = None
+        self._project_ids: list[str] = []
 
         self.setWindowTitle(f"{APP_NAME} — Setup")
         self.setWindowIcon(make_icon())
 
         layout = QGridLayout(self)
+        row = 0
 
         info = QLabel(
             "Google Keep has no public API, so this connects the same way\n"
             "the Android app does. To get an OAuth Token: open\n"
             "accounts.google.com/EmbeddedSetup in a browser, sign in, then\n"
             "copy the 'oauth_token' cookie's value (dev tools > Application\n"
-            "> Cookies) and paste it below. Full steps are in README.md."
+            "> Cookies). Leave it blank to reuse an already-saved token.\n"
+            "The Super Productivity Access Token is in the desktop app under\n"
+            "Settings > Misc (enable the local REST API there first)."
         )
-        layout.addWidget(info, 0, 0, 1, 2)
+        layout.addWidget(info, row, 0, 1, 2)
+        row += 1
 
-        layout.addWidget(QLabel("Google account email:"), 1, 0)
+        layout.addWidget(QLabel("Google account email:"), row, 0)
         self.email_edit = QLineEdit(self.cfg.get("email", ""))
-        layout.addWidget(self.email_edit, 1, 1)
+        layout.addWidget(self.email_edit, row, 1)
+        row += 1
 
-        layout.addWidget(QLabel("OAuth Token:"), 2, 0)
+        layout.addWidget(QLabel("OAuth Token:"), row, 0)
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        layout.addWidget(self.token_edit, 2, 1)
+        self.token_edit.setPlaceholderText("blank = reuse saved master token")
+        layout.addWidget(self.token_edit, row, 1)
+        row += 1
 
-        layout.addWidget(QLabel("Sync every (minutes):"), 3, 0)
+        layout.addWidget(QLabel("SP API base URL:"), row, 0)
+        self.sp_url_edit = QLineEdit(self.cfg.get("sp_api_base_url", core.DEFAULT_SP_API_BASE_URL))
+        layout.addWidget(self.sp_url_edit, row, 1)
+        row += 1
+
+        layout.addWidget(QLabel("SP Access Token:"), row, 0)
+        self.sp_token_edit = QLineEdit(self.cfg.get("sp_access_token", ""))
+        self.sp_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(self.sp_token_edit, row, 1)
+        row += 1
+
+        self.connect_btn = QPushButton("Connect && load lists")
+        self.connect_btn.clicked.connect(self._connect)
+        layout.addWidget(self.connect_btn, row, 0, 1, 2)
+        row += 1
+
+        layout.addWidget(QLabel("Keep list:"), row, 0)
+        self.note_combo = QComboBox()
+        self.note_combo.setEnabled(False)
+        layout.addWidget(self.note_combo, row, 1)
+        row += 1
+
+        layout.addWidget(QLabel("Super Productivity project:"), row, 0)
+        self.project_combo = QComboBox()
+        self.project_combo.setEnabled(False)
+        layout.addWidget(self.project_combo, row, 1)
+        row += 1
+
+        layout.addWidget(QLabel("Sync every (minutes):"), row, 0)
         self.interval_spin = QSpinBox()
         self.interval_spin.setMinimum(1)
         self.interval_spin.setMaximum(24 * 60)
         self.interval_spin.setValue(int(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES)))
-        layout.addWidget(self.interval_spin, 3, 1)
+        layout.addWidget(self.interval_spin, row, 1)
+        row += 1
 
         self.startup_check = QCheckBox("Start automatically when I log in")
         self.startup_check.setChecked(bool(self.cfg.get("run_at_startup", False)))
-        layout.addWidget(self.startup_check, 4, 0, 1, 2)
+        layout.addWidget(self.startup_check, row, 0, 1, 2)
+        row += 1
 
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #c0392b;")
         self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label, 5, 0, 1, 2)
+        layout.addWidget(self.status_label, row, 0, 1, 2)
+        row += 1
 
         self.submit_btn = QPushButton("Save && Start Syncing")
-        self.submit_btn.clicked.connect(self._submit)
-        layout.addWidget(self.submit_btn, 6, 0, 1, 2)
-
-    def _submit(self) -> None:
-        email = self.email_edit.text().strip()
-        token = self.token_edit.text().strip()
-        interval = self.interval_spin.value()
-
-        if not email or not token:
-            self.status_label.setText("Email and OAuth Token are both required.")
-            return
-
         self.submit_btn.setEnabled(False)
-        self.status_label.setText("Signing in to Google...")
-        QApplication.processEvents()
+        self.submit_btn.clicked.connect(self._submit)
+        layout.addWidget(self.submit_btn, row, 0, 1, 2)
 
-        try:
-            master_token = core.exchange_master_token(email, token)
-        except Exception as e:
-            self.status_label.setText(f"Sign-in failed: {e}")
-            self.submit_btn.setEnabled(True)
+    def _resolve_master_token(self, email: str, oauth_token: str, state_dir) -> str:
+        if oauth_token:
+            master_token = core.exchange_master_token(email, oauth_token)
+            core.save_master_token(state_dir, master_token)
+            return master_token
+        return core.get_master_token(state_dir)  # raises RuntimeError if none saved
+
+    def _connect(self) -> None:
+        email = self.email_edit.text().strip()
+        oauth_token = self.token_edit.text().strip()
+        sp_url = self.sp_url_edit.text().strip() or core.DEFAULT_SP_API_BASE_URL
+        sp_token = self.sp_token_edit.text().strip()
+
+        if not email or not sp_token:
+            self.status_label.setText("Email and SP Access Token are required.")
             return
 
         state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
-        core.save_master_token(state_dir, master_token)
+        self.connect_btn.setEnabled(False)
+        self.status_label.setText("Connecting to Google and Super Productivity…")
+        QApplication.processEvents()
 
+        try:
+            master_token = self._resolve_master_token(email, oauth_token, state_dir)
+        except Exception as e:
+            self.status_label.setText(f"Google sign-in failed: {e}")
+            self.connect_btn.setEnabled(True)
+            return
+
+        try:
+            titles = core.list_keep_checklist_titles(
+                email, master_token, state_dir, self.cfg.get("include_archived", False)
+            )
+        except Exception as e:
+            self.status_label.setText(f"Could not read Keep lists: {e}")
+            self.connect_btn.setEnabled(True)
+            return
+
+        try:
+            projects = core.list_sp_projects(sp_url, sp_token)
+        except Exception as e:
+            self.status_label.setText(f"Could not reach Super Productivity: {e}")
+            self.connect_btn.setEnabled(True)
+            return
+
+        self.note_combo.clear()
+        self.note_combo.addItems(titles or [])
+        self.note_combo.setEnabled(bool(titles))
+        if self.cfg.get("keep_note_title") in titles:
+            self.note_combo.setCurrentText(self.cfg["keep_note_title"])
+
+        self._project_ids = [pid for pid, _ in projects]
+        self.project_combo.clear()
+        self.project_combo.addItems([title for _, title in projects])
+        self.project_combo.setEnabled(bool(projects))
+        if self.cfg.get("sp_project_id") in self._project_ids:
+            self.project_combo.setCurrentIndex(self._project_ids.index(self.cfg["sp_project_id"]))
+
+        if not titles:
+            self.status_label.setText("Connected, but no Keep checklists were found.")
+        elif not projects:
+            self.status_label.setText("Connected, but no Super Productivity projects were found.")
+        else:
+            self.status_label.setStyleSheet("color: #27ae60;")
+            self.status_label.setText("Connected. Pick a list and a project, then Save.")
+            self.submit_btn.setEnabled(True)
+
+        self.connect_btn.setEnabled(True)
+
+    def _submit(self) -> None:
+        note_title = self.note_combo.currentText().strip()
+        project_idx = self.project_combo.currentIndex()
+        if not note_title or project_idx < 0 or project_idx >= len(self._project_ids):
+            self.status_label.setStyleSheet("color: #c0392b;")
+            self.status_label.setText("Pick a Keep list and a project first (use Connect).")
+            return
+
+        state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
         self.cfg.update(
-            email=email,
+            email=self.email_edit.text().strip(),
             state_dir=str(state_dir),
             include_archived=self.cfg.get("include_archived", False),
-            sync_interval_minutes=interval,
+            sync_interval_minutes=self.interval_spin.value(),
             run_at_startup=self.startup_check.isChecked(),
+            sp_api_base_url=self.sp_url_edit.text().strip() or core.DEFAULT_SP_API_BASE_URL,
+            sp_access_token=self.sp_token_edit.text().strip(),
+            sp_project_id=self._project_ids[project_idx],
+            keep_note_title=note_title,
         )
         core.save_config(CONFIG_PATH, self.cfg)
 

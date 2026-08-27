@@ -1,16 +1,30 @@
 # keep-sync-daemon
 
 Talks to a Google Keep account via the unofficial [`gkeepapi`](https://github.com/kiwiz/gkeepapi)
-library. Each run: applies any checked/title edits the `sp-plugin` queued in
-`<state_dir>/pending_changes.json` (writing them to Keep), then writes every
-checklist note's current state (title + items + checked state) to
-`<state_dir>/state.json` (default `~/.sp-keep-sync/state.json`).
+library, and to a running Super Productivity desktop app via its
+[Local REST API](https://github.com/super-productivity/super-productivity/blob/master/docs/wiki/3.01-API.md)
+(`http://127.0.0.1:3876`). Each run pulls one Keep checklist and reconciles
+it against one SP project: creating/updating tasks on the SP side, and
+pushing checked/renamed/new items back to Keep. SP then syncs those task
+changes onward through whatever backend it's configured for (Super Sync,
+Dropbox, WebDAV, local files).
 
 It's meant to run on a schedule (cron / systemd timer / Task Scheduler, or
-one of the tray apps below, which schedule themselves); the `sp-plugin` half
-of this project reads `state.json` and writes `pending_changes.json`. New
-items and deletes never propagate in either direction — see the top-level
-README's constraints section for exactly what does and doesn't sync.
+one of the tray apps below, which schedule themselves). The Keep-item ↔
+SP-task mapping is kept in `<state_dir>/item_map.json` (default
+`~/.sp-keep-sync/`). Deletes never propagate in either direction — see the
+top-level README's constraints section for exactly what does and doesn't
+sync.
+
+## Super Productivity setup (do this first)
+
+In the SP **desktop** app:
+
+1. **Settings → Misc → Enable local REST API** — turn it on.
+2. **Settings → Misc → Access Token** — copy this; it's the
+   `sp_access_token` below.
+
+SP has to be running for a sync pass to touch the SP side.
 
 ## Setup
 
@@ -20,7 +34,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp config.example.json config.json
-# edit config.json: set "email" to your Google account
+# edit config.json: set "email", "sp_access_token", "sp_project_id"
+# (see `GET http://127.0.0.1:3876/projects` with the token), and
+# "keep_note_title" (the exact title of the Keep checklist to sync)
 ```
 
 ## Getting a master token (one-time, the annoying part)
@@ -69,11 +85,10 @@ chance of Google flagging subsequent logins as suspicious.
 python3 keep_sync_daemon.py --config config.json
 ```
 
-On success it prints how many checklists it wrote and updates
-`state.json`. On failure (bad token, network error, Google login challenge)
-it prints an error to stderr, exits non-zero, and **leaves the previous
-`state.json` untouched** — so a transient failure never blanks out what the
-Super Productivity plugin sees.
+On success it prints how many tasks/items it created and updated on each
+side. On failure (bad token, network error, Google login challenge, SP not
+running) it prints an error to stderr, exits non-zero, and **leaves both
+sides untouched** — so a transient failure never makes a partial change.
 
 ## Windows: system-tray app (no terminal, no Task Scheduler)
 
@@ -103,14 +118,18 @@ startup box (or re-pointing the shortcut) once.
 2. Enter an **OAuth Token** from Google's embedded sign-in flow — this is
    still the same manual, fragile step described above (see
    [Getting a master token](#getting-a-master-token-one-time-the-annoying-part));
-   the GUI only replaces the token-exchange script, not that step.
-3. Set a sync interval and optionally check "Start automatically when
-   Windows starts" (adds a per-user `HKCU\...\Run` registry entry — no
-   admin rights needed).
-4. Click **Save & Start Syncing**. The app exchanges the OAuth Token for a
+   the GUI only replaces the token-exchange script, not that step. On a
+   later reconfigure you can leave this blank to reuse the saved token.
+3. Enter the **SP Access Token** (from SP → Settings → Misc; leave the API
+   base URL at its default unless you've changed SP's port).
+4. Click **Connect & load lists**. The app exchanges the OAuth Token for a
    master token (same `gpsoauth.exchange_token()` call as
-   `get_master_token.py`), saves it to `<state_dir>/master_token`, and
-   drops into the tray.
+   `get_master_token.py`), saves it to `<state_dir>/master_token`, then
+   fetches your Keep checklists and SP projects.
+5. Pick the **Keep list** and **Super Productivity project** from the
+   dropdowns, set a sync interval, optionally check "Start automatically
+   when Windows starts" (a per-user `HKCU\...\Run` entry — no admin rights).
+6. Click **Save & Start Syncing**.
 
 Once running, double-click the tray icon (or right-click for the full menu)
 to open a small status window with the account email, the last sync
@@ -118,15 +137,15 @@ result, and **Sync now** / **Reconfigure…** buttons. The right-click menu
 itself has:
 - **Show status** — same window as double-click.
 - **Sync now** — runs an out-of-band sync immediately.
-- **Open data folder** — opens `state_dir` (where `state.json` lives) in
-  Explorer.
+- **Open data folder** — opens `state_dir` (where `item_map.json` and
+  `last_sync.json` live) in Explorer.
 - **Reconfigure…** — re-opens the setup window (e.g. to rotate a stale
-  token or change the sync interval).
+  token, change the list/project, or change the sync interval).
 - **Quit** — stops the background sync loop and exits.
 
 The tray icon's tooltip shows the outcome of the last sync; a failed sync
-also raises a Windows notification and, as with the CLI daemon, never
-touches the previous `state.json`.
+also raises a Windows notification and, as with the CLI daemon, leaves
+both sides untouched.
 
 ## Linux/KDE: system-tray app (Qt, native Plasma tray)
 
@@ -154,9 +173,10 @@ binary lives.
 
 Setup, the tray menu (Show status / Sync now / Open data folder /
 Reconfigure… / Quit), and the status window are all the same as the
-Windows version above — same OAuth Token flow, same `keep_sync_core.py`
-sync logic. "Start automatically" writes an XDG autostart entry to
-`~/.config/autostart/keep-sync-tray.desktop` instead of a registry key.
+Windows version above — same OAuth Token + SP Access Token flow, same
+`keep_sync_core.py` sync logic. "Start automatically" writes an XDG
+autostart entry to `~/.config/autostart/keep-sync-tray.desktop` instead of
+a registry key.
 
 One caveat: double-click-to-open-status isn't guaranteed on every Linux
 desktop — some tray implementations (including Plasma, depending on
@@ -169,9 +189,9 @@ This section is for `keep_sync_daemon.py` run via an external scheduler.
 If you're using the Windows tray app above, skip this — it schedules
 itself.
 
-Pick an interval that matches the plugin's sync interval (configured in the
-SP plugin's UI) — there's no point polling Keep faster than the plugin
-re-reads the file.
+Pick an interval that matches how quickly you want cross-side edits to
+converge; every 5 minutes is a reasonable default. The SP desktop app must
+be running when the pass fires for it to touch the SP side.
 
 **cron** (every 5 minutes):
 ```cron
@@ -197,3 +217,8 @@ same interval.
   the top-level project README for why.
 - Trashed notes are always skipped; archived notes are skipped unless
   `"include_archived": true` is set in `config.json`.
+- If SP isn't running (or the local REST API is off), a pass fails cleanly
+  with an "unreachable" error and changes nothing until SP is back.
+- The Keep-item ↔ SP-task mapping lives in `<state_dir>/item_map.json`. If
+  you delete a Keep list and recreate it with the same title, the mapping
+  is stale — clear that file (or the relevant note-id entry) to re-pair.

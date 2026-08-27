@@ -2,80 +2,79 @@
 
 Two-way sync between a Google Keep checklist and a project in
 [Super Productivity](https://super-productivity.com) — pick the Keep list and
-the target project from a dropdown inside a Super Productivity plugin.
-Checking off or renaming an item on either side updates the other. New items
-only flow one direction, Keep → SP (see the constraints below).
+the target project once (from a tray app, or in `config.json`). Checking off
+or renaming an item on either side updates the other. New items sync both
+ways (a new Keep item makes a task; a new top-level task makes a Keep item);
+deletes never propagate.
 
-## Why two parts
+## How it works
 
-Google Keep has no public API for personal accounts, and Super Productivity
-plugins run in a sandbox that cannot make network calls to `localhost` or
-embed Python. So this is two pieces bridged by two small local JSON files:
+Google Keep has no public API for personal accounts, so a small Python
+process holds the Google "master token" and talks to Keep through the
+unofficial `gkeepapi` library. It reconciles the chosen checklist against
+the chosen Super Productivity project through **SP's Local REST API**
+(`http://127.0.0.1:3876`). SP itself turns the resulting task
+create/update calls into sync operations and pushes them to whatever
+backend you've set up in SP — Super Sync, Dropbox, WebDAV, or local files.
 
 ```
-┌─────────────────────────┐                  ┌───────────────────────────┐
-│ keep-sync-daemon         │                  │ sp-plugin                  │
-│ (Python, gkeepapi)       │                  │ (runs inside SP, Electron  │
-│                           │──── writes ────▶│ desktop only)              │
-│ cron/timer → polls Keep  │   state.json     │ state.json → reads via     │
-│ → applies pending_       │                  │ executeNodeScript, then    │
-│   changes.json to Keep,  │◀─── writes ──────│ PluginAPI.addTask/updateTask│
-│   then re-reads Keep     │ pending_changes  │ TASK_UPDATE hook → queues  │
-│ → ~/.sp-keep-sync/*.json │      .json       │ edited items to that file  │
-└─────────────────────────┘                  └───────────────────────────┘
+┌──────────────────────────────┐          ┌────────────────────────────┐
+│ keep-sync-daemon / tray app   │          │ Super Productivity (desktop)│
+│ (Python, gkeepapi)            │          │                             │
+│                                │── REST ─▶│ Local REST API :3876         │
+│ timer → pull Keep checklist   │  add /   │  POST /tasks  PATCH /tasks   │
+│      → reconcile vs. SP        │  update  │  GET /tasks   GET /projects  │
+│      → push item edits to Keep │◀── read ─│                             │
+│ item_map.json remembers the    │  tasks   │  ↓ SP's own sync            │
+│ Keep-item ↔ SP-task pairing    │          │  Super Sync / Dropbox / …   │
+└──────────────────────────────┘          └────────────────────────────┘
 ```
 
-- **keep-sync-daemon/** — a Python script using the unofficial `gkeepapi`
-  library, run on a schedule outside Super Productivity. Each pass first
-  applies any queued Super Productivity edits (`pending_changes.json`) to
-  Keep, then dumps every Keep checklist note to `~/.sp-keep-sync/state.json`.
-- **sp-plugin/** — a Super Productivity plugin. Its UI (a picker for the
-  Keep list + target project) runs as an iframe; its background sync loop
-  runs as `plugin.js` so it keeps polling even while that UI isn't open. It
-  reads `state.json` via SP's `executeNodeScript` (the only way a plugin can
-  touch the filesystem) and creates/updates tasks through the normal
-  `PluginAPI.addTask` / `updateTask` calls. It also listens for the
-  `TASK_UPDATE` hook and writes checked/title edits made in SP to
-  `pending_changes.json` for the daemon to pick up on its next cycle.
+There is no longer a Super Productivity plugin or a `state.json` file
+bridge — earlier versions had both. The Keep-item ↔ SP-task mapping now
+lives in `~/.sp-keep-sync/item_map.json`, owned by the Python side.
 
-See each subfolder's README for setup specifics.
+**Trade-off:** the SP desktop app must be running (with its local REST API
+enabled) for a sync pass to change anything on the SP side. A pass while
+SP is closed still pulls Keep but can't create or update tasks until SP is
+back up. The old plugin only ran while SP was open either way, so in
+practice this changes little.
 
-## Setup order
+## Setup
 
-1. **keep-sync-daemon**: follow [`keep-sync-daemon/README.md`](keep-sync-daemon/README.md)
-   to install deps, mint a Keep master token, and get a scheduled run
-   writing `~/.sp-keep-sync/state.json`. Verify the file exists and has
-   content before moving on.
-2. **sp-plugin**: run `./build_plugin.sh` to produce `keep-list-sync.zip`,
-   then in Super Productivity: **Settings → Plugins → Upload**. You'll get a
-   native consent prompt for Node.js execution — this plugin needs it to
-   read `state.json`; it's flagged as unverified third-party code by design
-   (see [`sp-plugin`'s section of the plugin docs](https://github.com/super-productivity/super-productivity/blob/master/docs/plugin-development.md#nodejs-script-execution)
-   for what that grants). Only accept it if you're comfortable with what
-   this repo's code does — read `sp-plugin/plugin.js` first.
-3. Open the plugin's panel in Super Productivity, pick your Keep list and
-   target project, set a sync interval, and hit **Save**.
+You need two things from Super Productivity's desktop app first:
+
+1. **Settings → Misc → Enable local REST API** (turn it on).
+2. **Settings → Misc → Access Token** — copy this token.
+
+Then follow [`keep-sync-daemon/README.md`](keep-sync-daemon/README.md):
+
+- **Tray app** (`keep_sync_tray.py` on Windows, `keep_sync_tray_qt.py` on
+  Linux): first launch shows a setup window — enter your Google email, a
+  Google OAuth Token, and the SP Access Token, click **Connect & load
+  lists**, then pick the Keep list and SP project from the dropdowns and
+  hit **Save**.
+- **CLI** (`keep_sync_daemon.py` via cron/systemd/Task Scheduler): mint a
+  master token with `get_master_token.py`, fill in `config.json` from
+  `config.example.json` (including `sp_access_token`, `sp_project_id`, and
+  `keep_note_title`), and schedule the script.
 
 ## Constraints worth knowing before you rely on this
 
-- **Desktop only.** `executeNodeScript` (and therefore this whole design) is
-  Electron-desktop-only — it will not work on the SP web app or mobile
-  builds.
-- **Unofficial Keep access.** `gkeepapi` reverse-engineers Google's internal
-  mobile API. It can break without notice, and login occasionally gets
-  challenged by Google (especially on 2FA accounts) — see the daemon
+- **Desktop only, SP must be running.** The Local REST API is desktop-only
+  and only answers while the app is open.
+- **Unofficial Keep access.** `gkeepapi` reverse-engineers Google's
+  internal mobile API. It can break without notice, and login occasionally
+  gets challenged by Google (especially on 2FA accounts) — see the daemon
   README's troubleshooting section.
-- **Checked/renamed items sync both ways; new items and deletes don't.**
-  Checking off or renaming an item flows in whichever direction it happened.
-  But a new item added directly in Keep creates a matching SP task, while a
-  new task added directly in SP does **not** create a matching Keep item —
-  and removing an item/task on either side never removes or completes its
-  counterpart. Both are deliberate: they keep this from ever making a
-  destructive or surprising change on either side of a background sync loop.
-- **Flat items only (v1).** Indented/nested Keep checklist sub-items are
-  synced as flat, independent tasks — no SP subtask hierarchy is inferred
-  from Keep's indentation, to keep the first version simple.
-- **`nodeExecution` is a broad grant.** Per Super Productivity's own docs, a
-  plugin with this permission can run arbitrary code with full machine
-  access, gated only by a one-time consent dialog. Review `plugin.js` before
-  granting it, and revoke by disabling the plugin if you change your mind.
+- **Checked/renamed/new items sync; deletes don't.** Checking off or
+  renaming an item flows in whichever direction it happened. A new Keep
+  item creates a matching SP task and a new top-level SP task creates a
+  matching Keep item. Removing an item/task on either side never removes
+  or completes its counterpart — deliberately, so a background loop never
+  makes a destructive change.
+- **Flat items only.** Indented Keep sub-items and SP subtasks are not
+  mapped to each other; SP subtasks are skipped entirely in the SP → Keep
+  direction.
+- **On a conflict, Keep wins.** If the same item's text or checked state
+  changed on both sides between passes, the Keep value is applied to SP.

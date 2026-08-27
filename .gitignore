@@ -2,7 +2,6 @@ keep-sync-daemon/.venv/
 keep-sync-daemon/config.json
 keep-sync-daemon/__pycache__/
 *.pyc
-keep-list-sync.zip
 
 # PyInstaller build output (see requirements-windows.txt / requirements-linux.txt)
 keep-sync-daemon/build/

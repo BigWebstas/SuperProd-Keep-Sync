@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-Reads Google Keep checklist notes via gkeepapi and writes their current
-state (title + items + checked flags) to a local JSON file. Intended to
-run on a schedule (cron/systemd timer/Task Scheduler) — see README.md.
+Runs one Keep <-> Super Productivity reconcile pass (see
+keep_sync_core.sync_once): pulls a Google Keep checklist via gkeepapi and
+reconciles it against one SP project through SP's Local REST API, creating
+and updating tasks on the SP side and pushing checked/renamed/new items
+back to Keep. Intended to run on a schedule (cron/systemd timer/Task
+Scheduler) — see README.md.
 
-For a Windows app that runs its own schedule from a system-tray icon
-instead of an external scheduler, see keep_sync_tray.py.
+For a GUI app that runs its own schedule from a system-tray icon instead
+of an external scheduler, see keep_sync_tray.py (Windows) /
+keep_sync_tray_qt.py (Linux).
 
-The Super Productivity plugin (../sp-plugin) reads this file through its
-own Node.js execution sandbox; this script never talks to Super
-Productivity directly.
+config.json must carry the SP fields (sp_access_token, sp_project_id,
+keep_note_title) — see config.example.json. The SP desktop app has to be
+running with its local REST API enabled for a pass to touch the SP side.
 
-On any failure, the previously written state file is left untouched so a
-transient Keep/login error never blanks out the plugin's view.
+On any failure both sides are left untouched, so a transient Keep/login
+error or SP being closed never corrupts either side.
 """
 import argparse
 import json

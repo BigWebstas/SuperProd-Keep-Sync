@@ -27,7 +27,7 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 
 import keep_sync_core as core
 
@@ -54,6 +54,10 @@ def default_config() -> dict:
         "include_archived": False,
         "sync_interval_minutes": core.DEFAULT_SYNC_INTERVAL_MINUTES,
         "run_at_startup": False,
+        "sp_api_base_url": core.DEFAULT_SP_API_BASE_URL,
+        "sp_access_token": "",
+        "sp_project_id": "",
+        "keep_note_title": "",
     }
 
 
@@ -68,6 +72,8 @@ def load_or_default_config() -> dict:
 
 def needs_setup(cfg: dict) -> bool:
     if not cfg.get("email"):
+        return True
+    if not (cfg.get("sp_access_token") and cfg.get("sp_project_id") and cfg.get("keep_note_title")):
         return True
     state_dir = core.resolve_state_dir(cfg.get("state_dir", core.DEFAULT_STATE_DIR))
     return not (state_dir / "master_token").exists()
@@ -107,27 +113,32 @@ def make_icon_image():
 
 
 class SetupWindow(tk.Tk):
-    """Collects email + OAuth Token, exchanges it for a master token, and
-    saves config.json. Returns the finished config via `result`, or leaves
-    `result` as None if the user closes the window without finishing."""
+    """Collects the Google + Super Productivity credentials, then (via the
+    "Connect & load lists" button) fetches the Keep checklists and SP
+    projects to pick from. Returns the finished config via `result`, or
+    leaves `result` as None if the user closes the window without
+    finishing."""
 
     def __init__(self, cfg: dict):
         super().__init__()
         self.cfg = dict(cfg)
         self.result: dict | None = None
+        self._project_ids: list[str] = []
 
         self.title(f"{APP_NAME} — Setup")
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self._cancel)
 
-        pad = {"padx": 10, "pady": 6}
+        pad = {"padx": 10, "pady": 4}
 
         info = (
             "Google Keep has no public API, so this connects the same way\n"
             "the Android app does. To get an OAuth Token: open\n"
             "accounts.google.com/EmbeddedSetup in a browser, sign in, then\n"
             "copy the 'oauth_token' cookie's value (dev tools > Application\n"
-            "> Cookies) and paste it below. Full steps are in README.md."
+            "> Cookies). Leave it blank to reuse an already-saved token.\n"
+            "The Super Productivity Access Token is in the desktop app under\n"
+            "Settings > Misc (enable the local REST API there first)."
         )
         tk.Label(self, text=info, justify="left").grid(row=0, column=0, columnspan=2, **pad)
 
@@ -139,65 +150,155 @@ class SetupWindow(tk.Tk):
         self.token_var = tk.StringVar()
         tk.Entry(self, textvariable=self.token_var, width=36, show="•").grid(row=2, column=1, **pad)
 
-        tk.Label(self, text="Sync every (minutes):").grid(row=3, column=0, sticky="e", **pad)
+        tk.Label(self, text="SP API base URL:").grid(row=3, column=0, sticky="e", **pad)
+        self.sp_url_var = tk.StringVar(value=self.cfg.get("sp_api_base_url", core.DEFAULT_SP_API_BASE_URL))
+        tk.Entry(self, textvariable=self.sp_url_var, width=36).grid(row=3, column=1, **pad)
+
+        tk.Label(self, text="SP Access Token:").grid(row=4, column=0, sticky="e", **pad)
+        self.sp_token_var = tk.StringVar(value=self.cfg.get("sp_access_token", ""))
+        tk.Entry(self, textvariable=self.sp_token_var, width=36, show="•").grid(row=4, column=1, **pad)
+
+        self.connect_btn = tk.Button(self, text="Connect & load lists", command=self._connect)
+        self.connect_btn.grid(row=5, column=0, columnspan=2, pady=6)
+
+        tk.Label(self, text="Keep list:").grid(row=6, column=0, sticky="e", **pad)
+        self.note_var = tk.StringVar()
+        self.note_combo = ttk.Combobox(self, textvariable=self.note_var, width=34, state="disabled")
+        self.note_combo.grid(row=6, column=1, **pad)
+
+        tk.Label(self, text="Super Productivity project:").grid(row=7, column=0, sticky="e", **pad)
+        self.project_var = tk.StringVar()
+        self.project_combo = ttk.Combobox(self, textvariable=self.project_var, width=34, state="disabled")
+        self.project_combo.grid(row=7, column=1, **pad)
+
+        tk.Label(self, text="Sync every (minutes):").grid(row=8, column=0, sticky="e", **pad)
         self.interval_var = tk.StringVar(
             value=str(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES))
         )
-        tk.Entry(self, textvariable=self.interval_var, width=8).grid(row=3, column=1, sticky="w", **pad)
+        tk.Entry(self, textvariable=self.interval_var, width=8).grid(row=8, column=1, sticky="w", **pad)
 
         self.startup_var = tk.BooleanVar(value=self.cfg.get("run_at_startup", False))
         tk.Checkbutton(
             self, text="Start automatically when Windows starts", variable=self.startup_var
-        ).grid(row=4, column=0, columnspan=2, sticky="w", **pad)
+        ).grid(row=9, column=0, columnspan=2, sticky="w", **pad)
 
         self.status_var = tk.StringVar(value="")
-        tk.Label(self, textvariable=self.status_var, fg="red", wraplength=380, justify="left").grid(
-            row=5, column=0, columnspan=2, **pad
-        )
+        self.status_label = tk.Label(self, textvariable=self.status_var, fg="red", wraplength=380, justify="left")
+        self.status_label.grid(row=10, column=0, columnspan=2, **pad)
 
-        self.submit_btn = tk.Button(self, text="Save & Start Syncing", command=self._submit)
-        self.submit_btn.grid(row=6, column=0, columnspan=2, pady=10)
+        self.submit_btn = tk.Button(self, text="Save & Start Syncing", command=self._submit, state="disabled")
+        self.submit_btn.grid(row=11, column=0, columnspan=2, pady=10)
 
     def _cancel(self) -> None:
         self.result = None
         self.destroy()
 
-    def _submit(self) -> None:
-        email = self.email_var.get().strip()
-        token = self.token_var.get().strip()
+    def _resolve_master_token(self, email: str, oauth_token: str, state_dir) -> str:
+        if oauth_token:
+            master_token = core.exchange_master_token(email, oauth_token)
+            core.save_master_token(state_dir, master_token)
+            return master_token
+        return core.get_master_token(state_dir)  # raises RuntimeError if none saved
 
+    def _connect(self) -> None:
+        email = self.email_var.get().strip()
+        oauth_token = self.token_var.get().strip()
+        sp_url = self.sp_url_var.get().strip() or core.DEFAULT_SP_API_BASE_URL
+        sp_token = self.sp_token_var.get().strip()
+
+        if not email or not sp_token:
+            self.status_label.config(fg="red")
+            self.status_var.set("Email and SP Access Token are required.")
+            return
+
+        state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
+        self.connect_btn.config(state="disabled")
+        self.status_label.config(fg="red")
+        self.status_var.set("Connecting to Google and Super Productivity…")
+        self.update_idletasks()
+
+        try:
+            master_token = self._resolve_master_token(email, oauth_token, state_dir)
+        except Exception as e:
+            self.status_var.set(f"Google sign-in failed: {e}")
+            self.connect_btn.config(state="normal")
+            return
+
+        try:
+            titles = core.list_keep_checklist_titles(
+                email, master_token, state_dir, self.cfg.get("include_archived", False)
+            )
+        except Exception as e:
+            self.status_var.set(f"Could not read Keep lists: {e}")
+            self.connect_btn.config(state="normal")
+            return
+
+        try:
+            projects = core.list_sp_projects(sp_url, sp_token)
+        except Exception as e:
+            self.status_var.set(f"Could not reach Super Productivity: {e}")
+            self.connect_btn.config(state="normal")
+            return
+
+        self.note_combo.config(values=titles, state="readonly" if titles else "disabled")
+        if self.cfg.get("keep_note_title") in titles:
+            self.note_var.set(self.cfg["keep_note_title"])
+        elif titles:
+            self.note_var.set(titles[0])
+
+        self._project_ids = [pid for pid, _ in projects]
+        project_titles = [title for _, title in projects]
+        self.project_combo.config(values=project_titles, state="readonly" if projects else "disabled")
+        if self.cfg.get("sp_project_id") in self._project_ids:
+            self.project_var.set(project_titles[self._project_ids.index(self.cfg["sp_project_id"])])
+        elif project_titles:
+            self.project_var.set(project_titles[0])
+
+        self.connect_btn.config(state="normal")
+        if not titles:
+            self.status_var.set("Connected, but no Keep checklists were found.")
+        elif not projects:
+            self.status_var.set("Connected, but no Super Productivity projects were found.")
+        else:
+            self.status_label.config(fg="#27ae60")
+            self.status_var.set("Connected. Pick a list and a project, then Save.")
+            self.submit_btn.config(state="normal")
+
+    def _submit(self) -> None:
         try:
             interval = int(self.interval_var.get().strip())
             if interval < 1:
                 raise ValueError
         except ValueError:
+            self.status_label.config(fg="red")
             self.status_var.set("Sync interval must be a whole number of minutes (1 or more).")
             return
 
-        if not email or not token:
-            self.status_var.set("Email and OAuth Token are both required.")
-            return
+        note_title = self.note_var.get().strip()
+        project_title = self.project_var.get().strip()
+        project_titles = list(self.project_combo.cget("values"))
+        project_id = (
+            self._project_ids[project_titles.index(project_title)]
+            if project_title in project_titles and len(self._project_ids) == len(project_titles)
+            else ""
+        )
 
-        self.submit_btn.config(state="disabled")
-        self.status_var.set("Signing in to Google...")
-        self.update_idletasks()
-
-        try:
-            master_token = core.exchange_master_token(email, token)
-        except Exception as e:
-            self.status_var.set(f"Sign-in failed: {e}")
-            self.submit_btn.config(state="normal")
+        if not note_title or not project_id:
+            self.status_label.config(fg="red")
+            self.status_var.set("Pick a Keep list and a project first (use Connect).")
             return
 
         state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
-        core.save_master_token(state_dir, master_token)
-
         self.cfg.update(
-            email=email,
+            email=self.email_var.get().strip(),
             state_dir=str(state_dir),
             include_archived=self.cfg.get("include_archived", False),
             sync_interval_minutes=interval,
             run_at_startup=self.startup_var.get(),
+            sp_api_base_url=self.sp_url_var.get().strip() or core.DEFAULT_SP_API_BASE_URL,
+            sp_access_token=self.sp_token_var.get().strip(),
+            sp_project_id=project_id,
+            keep_note_title=note_title,
         )
         core.save_config(CONFIG_PATH, self.cfg)
 
