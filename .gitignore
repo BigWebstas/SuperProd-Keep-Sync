@@ -12,3 +12,4 @@ keep-sync-daemon/*.spec
 .sp-keep-sync/
 master_token
 */master_token
+CLAUDE.md
