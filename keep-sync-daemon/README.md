@@ -215,6 +215,8 @@ same interval.
   `get_master_token.py` to mint a fresh token.
 - Only flat checklist items are synced (no nested/indented sub-items) — see
   the top-level project README for why.
+- Blank Keep checklist lines (empty rows) are ignored — SP rejects an empty
+  task title, so they're skipped until they contain text.
 - Trashed notes are always skipped; archived notes are skipped unless
   `"include_archived": true` is set in `config.json`.
 - If SP isn't running (or the local REST API is off), a pass fails cleanly

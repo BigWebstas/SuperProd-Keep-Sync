@@ -160,6 +160,17 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(handles["keep me"].text, "keep me")
         self.assertFalse(handles["keep me"].checked)
 
+    def test_blank_keep_item_is_skipped(self):
+        note, _ = make_list(items=[("real task", False), ("", False), ("   ", False)])
+        sp = FakeSP()
+        item_map = {}
+
+        res = core.reconcile_sp(cfg(), FakeKeep([note]), sp, item_map)
+
+        self.assertEqual(res.created_sp, 1)
+        self.assertEqual([t.title for t in sp.tasks.values()], ["real task"])
+        self.assertEqual(len(item_map[note.id]), 1)
+
     def test_missing_note_raises_lookuperror(self):
         note, _ = make_list(title="Other")
         with self.assertRaises(LookupError):
