@@ -483,19 +483,29 @@ def run_selftest() -> int:
 def main() -> int:
     log.info("KeepSyncTray starting (frozen=%s, dir=%s)", getattr(sys, "frozen", False), APP_DIR)
     cfg = load_or_default_config()
+    force_setup = False
 
     while True:
-        if needs_setup(cfg):
-            cfg = run_setup_window(cfg)
-            if cfg is None:
+        if force_setup or needs_setup(cfg):
+            new_cfg = run_setup_window(cfg)
+            if new_cfg is None:
+                if force_setup:
+                    # User cancelled a Reconfigure… — keep the existing
+                    # config and go back to the tray rather than exiting.
+                    log.info("reconfigure cancelled; keeping current config")
+                    force_setup = False
+                    continue
                 log.info("setup window closed without finishing; exiting")
-                return 0  # user closed setup without finishing
+                return 0  # user closed initial setup without finishing
+            cfg = new_cfg
+            force_setup = False
 
         app = TrayApp(cfg)
         app.run()
 
         if app.reconfigure_requested:
             cfg = load_or_default_config()
+            force_setup = True
             continue
         log.info("KeepSyncTray exiting normally")
         return 0
