@@ -281,6 +281,12 @@ def reconcile_sp(cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", ite
 
     # 1. Keep -> SP: update mapped tasks, create tasks for new items.
     for item in note.items:
+        if not (item.text or "").strip():
+            # Blank Keep checklist line (a leftover empty row). SP's REST
+            # API rejects an empty task title, so there's nothing to
+            # create or push -- skip it until it has real text.
+            log.debug("skipping blank Keep item %s", item.id)
+            continue
         entry = note_map.get(item.id)
         if entry and entry.get("taskId"):
             task = sp_tasks.get(entry["taskId"])
