@@ -55,7 +55,7 @@ else:
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "keep_sync_tray_qt.log"
 
-log = core.setup_logging(LOG_PATH)
+log = core.setup_logging(LOG_PATH, relaunch_on_crash=True)
 
 AUTOSTART_DESKTOP_PATH = Path.home() / ".config" / "autostart" / "keep-sync-tray.desktop"
 
@@ -514,10 +514,20 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except SystemExit:
         raise
-    except BaseException as e:
+    except KeyboardInterrupt:
+        raise
+    except BaseException:
         log.critical("KeepSyncTrayQt crashed", exc_info=True)
+        # Try to come back up on our own; relaunch_after_crash() only returns
+        # once it's crashed too many times in a row to keep trying.
+        core.relaunch_after_crash(log)
         try:
-            QMessageBox.critical(None, APP_NAME, f"Unexpected error, exiting:\n{e}\n\nSee {LOG_PATH} for details.")
+            QMessageBox.critical(
+                None,
+                APP_NAME,
+                f"{APP_NAME} keeps crashing and won't restart itself again.\n\n"
+                f"See {LOG_PATH} for details.",
+            )
         except Exception:
             pass
         raise

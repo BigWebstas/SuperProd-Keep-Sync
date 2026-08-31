@@ -210,5 +210,53 @@ class RowShapeTests(unittest.TestCase):
         self.assertEqual(sp_client.SPClient._rows("nope", "x"), [])
 
 
+class CrashRelaunchDecisionTests(unittest.TestCase):
+    """core._crash_relaunch_decision: the crash-loop cap policy carried
+    across re-execs via env vars."""
+
+    START = core._CRASH_WINDOW_START_ENV
+    COUNT = core._CRASH_COUNT_ENV
+
+    def test_first_crash_relaunches_and_opens_window(self):
+        relaunch, updates = core._crash_relaunch_decision({}, 1000.0)
+        self.assertTrue(relaunch)
+        self.assertEqual(updates[self.COUNT], "1")
+        self.assertEqual(float(updates[self.START]), 1000.0)
+
+    def test_crashes_within_window_increment_count(self):
+        env = {self.START: repr(1000.0), self.COUNT: "1"}
+        relaunch, updates = core._crash_relaunch_decision(env, 1030.0)
+        self.assertTrue(relaunch)
+        self.assertEqual(updates[self.COUNT], "2")
+        self.assertEqual(float(updates[self.START]), 1000.0)  # window unchanged
+
+    def test_cap_reached_stops_relaunching(self):
+        env = {self.START: repr(1000.0), self.COUNT: str(core.CRASH_RELAUNCH_MAX)}
+        relaunch, updates = core._crash_relaunch_decision(env, 1030.0)
+        self.assertFalse(relaunch)
+        self.assertEqual(updates, {})
+
+    def test_crash_after_window_starts_fresh(self):
+        env = {self.START: repr(1000.0), self.COUNT: str(core.CRASH_RELAUNCH_MAX)}
+        now = 1000.0 + core.CRASH_RELAUNCH_WINDOW_SEC + 1
+        relaunch, updates = core._crash_relaunch_decision(env, now)
+        self.assertTrue(relaunch)
+        self.assertEqual(updates[self.COUNT], "1")
+        self.assertEqual(float(updates[self.START]), now)
+
+    def test_junk_env_is_treated_as_a_fresh_window(self):
+        env = {self.START: "not-a-float", self.COUNT: "garbage"}
+        relaunch, updates = core._crash_relaunch_decision(env, 1000.0)
+        self.assertTrue(relaunch)
+        self.assertEqual(updates[self.COUNT], "1")
+        self.assertEqual(float(updates[self.START]), 1000.0)
+
+    def test_negative_count_is_reset(self):
+        env = {self.START: repr(1000.0), self.COUNT: "-5"}
+        relaunch, updates = core._crash_relaunch_decision(env, 1010.0)
+        self.assertTrue(relaunch)
+        self.assertEqual(updates[self.COUNT], "1")
+
+
 if __name__ == "__main__":
     unittest.main()

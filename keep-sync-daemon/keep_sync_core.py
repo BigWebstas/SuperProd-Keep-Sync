@@ -37,12 +37,18 @@ import sp_client
 LOGGER_NAME = "keep_sync"
 
 
-def setup_logging(log_path: Path) -> logging.Logger:
+def setup_logging(log_path: Path, relaunch_on_crash: bool = False) -> logging.Logger:
     """Configures the shared "keep_sync" logger to write to log_path (a
     10MB x 3 rotating file, 40MB ceiling) and installs sys.excepthook /
     threading.excepthook so uncaught exceptions get logged instead of
     vanishing — the tray apps are --windowed builds with no console, so a
-    log file is the only place errors are visible at all."""
+    log file is the only place errors are visible at all.
+
+    relaunch_on_crash: when set (the tray apps do), a crash that reaches
+    sys.excepthook — e.g. one Qt routed out of a slot rather than letting
+    propagate to __main__ — re-execs the process via relaunch_after_crash()
+    before the default handler runs. The CLI daemon leaves this off; it's
+    meant to be supervised by cron/systemd."""
     import sys
     import threading
 
@@ -55,6 +61,8 @@ def setup_logging(log_path: Path) -> logging.Logger:
 
     def log_uncaught(exc_type, exc_value, exc_tb):
         logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+        if relaunch_on_crash and not issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
+            relaunch_after_crash(logger)  # no return unless the crash-loop cap is hit
         sys.__excepthook__(exc_type, exc_value, exc_tb)
 
     def log_uncaught_thread(args: "threading.ExceptHookArgs"):
@@ -66,6 +74,96 @@ def setup_logging(log_path: Path) -> logging.Logger:
     sys.excepthook = log_uncaught
     threading.excepthook = log_uncaught_thread
     return logger
+
+
+# --- crash auto-relaunch -----------------------------------------------------
+#
+# The tray apps are long-running --windowed processes with no supervisor, so
+# an unhandled crash just leaves the user with no tray icon and no sync. The
+# entry points call relaunch_after_crash() to re-exec themselves, capped so a
+# hard crash loop eventually stops instead of spinning forever.
+
+CRASH_RELAUNCH_WINDOW_SEC = 60
+CRASH_RELAUNCH_MAX = 3
+_CRASH_WINDOW_START_ENV = "KEEP_SYNC_CRASH_WINDOW_START"
+_CRASH_COUNT_ENV = "KEEP_SYNC_CRASH_COUNT"
+
+
+def _crash_relaunch_decision(env: dict, now: float) -> "tuple[bool, dict]":
+    """Pure policy behind relaunch_after_crash(): given the crash-tracking env
+    vars carried across re-execs and the current time, return
+    (should_relaunch, env_updates). Allows up to CRASH_RELAUNCH_MAX restarts
+    inside a rolling CRASH_RELAUNCH_WINDOW_SEC window; a crash more than that
+    window after the first one starts a fresh window."""
+    try:
+        start = float(env.get(_CRASH_WINDOW_START_ENV, now))
+    except ValueError:
+        start = now
+    try:
+        count = int(env.get(_CRASH_COUNT_ENV, "0") or "0")
+    except ValueError:
+        count = 0
+    if now - start > CRASH_RELAUNCH_WINDOW_SEC or count < 0:
+        start, count = now, 0
+    if count >= CRASH_RELAUNCH_MAX:
+        return False, {}
+    return True, {_CRASH_WINDOW_START_ENV: repr(start), _CRASH_COUNT_ENV: str(count + 1)}
+
+
+def relaunch_after_crash(logger) -> bool:
+    """Restart this process (frozen exe or `python foo.py` run) after an
+    unhandled crash. On POSIX this re-execs and never returns on success; on
+    Windows, where exec* semantics are spawn-then-exit, it launches a detached
+    replacement with subprocess.Popen and hard-exits the current process.
+    Returns False without doing anything once the crash-loop cap is hit, so
+    the caller can surface the failure and exit."""
+    import subprocess
+    import sys
+    import time
+
+    relaunch, env_updates = _crash_relaunch_decision(dict(os.environ), time.time())
+    if not relaunch:
+        logger.critical(
+            "crashed %d times within %ds -- not relaunching again so the failure stays visible",
+            CRASH_RELAUNCH_MAX, CRASH_RELAUNCH_WINDOW_SEC,
+        )
+        return False
+
+    if getattr(sys, "frozen", False):
+        argv = [sys.executable, *sys.argv[1:]]
+    else:
+        argv = [sys.executable, os.path.abspath(sys.argv[0]), *sys.argv[1:]]
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    child_env = {**os.environ, **env_updates}
+    logger.critical("relaunching after crash: %s", " ".join(argv))
+
+    if os.name == "nt":
+        # os.execve on Windows spawns a new process and lets this one fall
+        # through, so control returns to whatever launched us before the
+        # replacement is up. Spawn a detached child and exit hard instead.
+        DETACHED_PROCESS = 0x00000008
+        try:
+            subprocess.Popen(
+                argv,
+                env=child_env,
+                close_fds=True,
+                creationflags=DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+        except OSError:
+            logger.critical("crash relaunch failed to spawn", exc_info=True)
+            return False
+        os._exit(1)
+
+    try:
+        os.execve(argv[0], argv, child_env)
+    except OSError:
+        logger.critical("crash relaunch failed to exec", exc_info=True)
+        return False
 
 DEFAULT_ANDROID_ID = "0000000000000000"
 DEFAULT_STATE_DIR = "~/.sp-keep-sync"
