@@ -44,7 +44,7 @@ else:
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = APP_DIR / "keep_sync_tray.log"
 
-log = core.setup_logging(LOG_PATH)
+log = core.setup_logging(LOG_PATH, relaunch_on_crash=True)
 
 
 def default_config() -> dict:
@@ -518,10 +518,19 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except SystemExit:
         raise
-    except BaseException as e:  # last-resort surface for a windowed (no console) exe
+    except KeyboardInterrupt:
+        raise
+    except BaseException:  # last-resort surface for a windowed (no console) exe
         log.critical("KeepSyncTray crashed", exc_info=True)
+        # Try to come back up on our own; relaunch_after_crash() only returns
+        # once it's crashed too many times in a row to keep trying.
+        core.relaunch_after_crash(log)
         try:
-            messagebox.showerror(APP_NAME, f"Unexpected error, exiting:\n{e}\n\nSee {LOG_PATH} for details.")
+            messagebox.showerror(
+                APP_NAME,
+                f"{APP_NAME} keeps crashing and won't restart itself again.\n\n"
+                f"See {LOG_PATH} for details.",
+            )
         except Exception:
             pass
         raise
