@@ -1,226 +1,105 @@
 # keep-sync-daemon
 
-Talks to a Google Keep account via the unofficial [`gkeepapi`](https://github.com/kiwiz/gkeepapi)
-library, and to a running Super Productivity desktop app via its
-[Local REST API](https://github.com/super-productivity/super-productivity/blob/master/docs/wiki/3.01-API.md)
-(`http://127.0.0.1:3876`). Each run pulls one Keep checklist and reconciles
-it against one SP project: creating/updating tasks on the SP side, and
-pushing checked/renamed/new items back to Keep. SP then syncs those task
-changes onward through whatever backend it's configured for (Super Sync,
-Dropbox, WebDAV, local files).
-
-It's meant to run on a schedule (cron / systemd timer / Task Scheduler, or
-one of the tray apps below, which schedule themselves). The Keep-item ↔
-SP-task mapping is kept in `<state_dir>/item_map.json` (default
-`~/.sp-keep-sync/`). Deletes never propagate in either direction — see the
-top-level README's constraints section for exactly what does and doesn't
+Talks to Google Keep via the unofficial [`gkeepapi`](https://github.com/kiwiz/gkeepapi)
+library and to a running Super Productivity desktop app via its
+[Local REST API](https://github.com/super-productivity/super-productivity/blob/master/docs/wiki/3.01-API.md).
+Each run reconciles one Keep checklist against one SP project, then SP syncs the
+task changes onward. See the top-level README for exactly what does and doesn't
 sync.
 
-## Super Productivity setup (do this first)
+On any failure (bad token, network error, Google login challenge, SP not
+running) it exits non-zero and **leaves both sides untouched** — a transient
+failure never makes a partial change.
 
-In the SP **desktop** app:
+## 1. Super Productivity
 
-1. **Settings → Misc → Enable local REST API** — turn it on.
-2. **Settings → Misc → Access Token** — copy this; it's the
-   `sp_access_token` below.
+**Settings → Misc → Enable local REST API**, then copy the **Access Token**. SP
+must be running for a pass to touch the SP side.
 
-SP has to be running for a sync pass to touch the SP side.
-
-## Setup
+## 2. Install
 
 ```bash
 cd keep-sync-daemon
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp config.example.json config.json
-# edit config.json: set "email", "sp_access_token", "sp_project_id"
-# (see `GET http://127.0.0.1:3876/projects` with the token), and
-# "keep_note_title" (the exact title of the Keep checklist to sync)
 ```
 
-## Getting a master token (one-time, the annoying part)
+Edit `config.json`: `email`, `sp_access_token`, `sp_project_id` (from
+`GET http://127.0.0.1:3876/projects`), and `keep_note_title` (the exact Keep
+checklist title).
 
-`gkeepapi` is unofficial — it authenticates using a Google "master token"
-instead of a normal OAuth app flow, since Keep has no public API for
-consumer accounts. A master token is as powerful as your password, so treat
-it accordingly (see storage options below).
+## 3. Master token (one-time, the fiddly part)
 
-1. Follow the [gpsoauth alternative-flow instructions](https://github.com/simon-weber/gpsoauth#alternative-flow)
-   to sign in through Google's embedded browser flow and capture an
-   **OAuth Token**. This is the fragile, manual step: it involves loading a
-   Google embedded-setup sign-in page yourself (not something this repo
-   automates, since it changes without notice and actively resists
-   automation).
-   1. Go to <https://accounts.google.com/EmbeddedSetup> and log into the
-      Google account you're syncing.
-   2. Click "I agree" when prompted. The page may then show a loading
-      screen forever — that's expected, ignore it.
-   3. Open your browser's dev tools (F12) → Application/Storage → Cookies
-      → `accounts.google.com`, and copy the value of the `oauth_token`
-      cookie. That value is what this repo calls the OAuth Token.
-   - **If your account has 2-Step Verification enabled**, this flow commonly
-     fails outright. The common workaround is to temporarily disable 2FA,
-     mint the token, then re-enable 2FA — a real tradeoff you should decide
-     on deliberately, not something this script does for you.
-2. Run the helper in this repo and paste that OAuth Token when prompted —
-   it reads `email`/`state_dir` from `config.json`, so that's the only
-   input needed:
-   ```bash
-   python3 get_master_token.py
-   ```
-   It exchanges the token and writes the result straight to
-   `<state_dir>/master_token` (e.g. `~/.sp-keep-sync/master_token`) with
-   `0600` permissions — it does not print the master token unless you pass
-   `--print` (useful if you'd rather use the `KEEP_MASTER_TOKEN` env var
-   instead of the file).
+`gkeepapi` authenticates with a Google "master token" — as powerful as your
+password, so store it carefully.
 
-The daemon caches Google's own sync cursor in `<state_dir>/google_sync_cache.json`
-after the first successful run, which reduces (but doesn't eliminate) the
-chance of Google flagging subsequent logins as suspicious.
+1. Get an **OAuth Token** from Google's embedded sign-in:
+   - Open <https://accounts.google.com/EmbeddedSetup>, sign in, click "I agree".
+     The page may hang on a loading screen — that's expected.
+   - Dev tools (F12) → Application → Cookies → `accounts.google.com` → copy the
+     `oauth_token` value.
+   - **With 2-Step Verification on, this flow usually fails.** The common
+     workaround is to disable 2FA, mint the token, then re-enable it.
+2. `python3 get_master_token.py` and paste the OAuth Token. It reads
+   `email`/`state_dir` from `config.json` and writes `<state_dir>/master_token`
+   (mode `0600`). Pass `--print` to use the `KEEP_MASTER_TOKEN` env var instead.
 
-## Running
+After the first successful run the daemon caches Google's sync cursor in
+`<state_dir>/google_sync_cache.json`, which reduces (not eliminates) suspicious-login
+challenges.
+
+## 4. Run
 
 ```bash
 python3 keep_sync_daemon.py --config config.json
 ```
 
-On success it prints how many tasks/items it created and updated on each
-side. On failure (bad token, network error, Google login challenge, SP not
-running) it prints an error to stderr, exits non-zero, and **leaves both
-sides untouched** — so a transient failure never makes a partial change.
+Prints how many tasks/items it created and updated on each side.
 
-## Windows: system-tray app (no terminal, no Task Scheduler)
+## Tray apps (no scheduler needed)
 
-`keep_sync_tray.py` packages the whole setup + scheduling flow above into a
-single Windows app with a system-tray icon — a GUI alternative to
-`get_master_token.py` + `keep_sync_daemon.py` + Task Scheduler.
+`keep_sync_tray.py` (Windows, pystray/tkinter) and `keep_sync_tray_qt.py`
+(Linux/KDE, PySide6) package the whole flow into a system-tray app that schedules
+itself. Use the Qt one on Linux — pystray's Linux tray backend doesn't integrate
+cleanly with Plasma.
 
-Run it from source:
 ```bash
-pip install -r requirements-windows.txt
-python keep_sync_tray.py
-```
+pip install -r requirements-windows.txt   # or requirements-linux.txt
+python keep_sync_tray.py                   # or keep_sync_tray_qt.py
 
-Or build a standalone `.exe` (no Python install required on the target
-machine):
-```bash
-pip install -r requirements-windows.txt
+# standalone binary:
 pyinstaller --onefile --windowed --name KeepSyncTray keep_sync_tray.py
 ```
-The `.exe` is written to `dist/KeepSyncTray.exe`. Keep it in a stable
-folder — `config.json` and the "start at login" registration are written
-next to wherever the exe lives, so moving it later means re-checking the
-startup box (or re-pointing the shortcut) once.
 
-**First launch** shows a small setup window instead of a terminal prompt:
-1. Enter your Google account email.
-2. Enter an **OAuth Token** from Google's embedded sign-in flow — this is
-   still the same manual, fragile step described above (see
-   [Getting a master token](#getting-a-master-token-one-time-the-annoying-part));
-   the GUI only replaces the token-exchange script, not that step. On a
-   later reconfigure you can leave this blank to reuse the saved token.
-3. Enter the **SP Access Token** (from SP → Settings → Misc; leave the API
-   base URL at its default unless you've changed SP's port).
-4. Click **Connect & load lists**. The app exchanges the OAuth Token for a
-   master token (same `gpsoauth.exchange_token()` call as
-   `get_master_token.py`), saves it to `<state_dir>/master_token`, then
-   fetches your Keep checklists and SP projects.
-5. Pick the **Keep list** and **Super Productivity project** from the
-   dropdowns, set a sync interval, optionally check "Start automatically
-   when Windows starts" (a per-user `HKCU\...\Run` entry — no admin rights).
-6. Click **Save & Start Syncing**.
+First launch shows a setup window: Google email, OAuth Token (same manual step as
+above), SP Access Token → **Connect & load lists** → pick the Keep list and SP
+project → set an interval → optionally "start at login" (per-user, no admin) →
+**Save & Start Syncing**. The tray menu has Show status, Sync now, Open data
+folder, Reconfigure, and Quit. `config.json` and the autostart entry are written
+next to the binary, so keep it in a stable folder.
 
-Once running, double-click the tray icon (or right-click for the full menu)
-to open a small status window with the account email, the last sync
-result, and **Sync now** / **Reconfigure…** buttons. The right-click menu
-itself has:
-- **Show status** — same window as double-click.
-- **Sync now** — runs an out-of-band sync immediately.
-- **Open data folder** — opens `state_dir` (where `item_map.json` and
-  `last_sync.json` live) in Explorer.
-- **Reconfigure…** — re-opens the setup window (e.g. to rotate a stale
-  token, change the list/project, or change the sync interval).
-- **Quit** — stops the background sync loop and exits.
+## Scheduling the CLI daemon
 
-The tray icon's tooltip shows the outcome of the last sync; a failed sync
-also raises a Windows notification and, as with the CLI daemon, leaves
-both sides untouched.
+Pick an interval matching how fast you want edits to converge; every 5 minutes is
+a reasonable default.
 
-## Linux/KDE: system-tray app (Qt, native Plasma tray)
-
-`keep_sync_tray_qt.py` is the same app as `keep_sync_tray.py` above, built
-on Qt (PySide6) instead of pystray/tkinter. Use this on Linux instead of
-the pystray-based script — pystray's Linux backend (GTK/AppIndicator)
-often doesn't integrate cleanly with KDE Plasma's tray (missing/mis-themed
-icons, odd menu behavior); `QSystemTrayIcon` speaks Plasma's
-StatusNotifierItem protocol natively.
-
-Run it from source:
-```bash
-pip install -r requirements-linux.txt
-python keep_sync_tray_qt.py
-```
-
-Or build a standalone binary:
-```bash
-pip install -r requirements-linux.txt
-pyinstaller --onefile --name KeepSyncTrayQt keep_sync_tray_qt.py
-```
-The binary is written to `dist/KeepSyncTrayQt`. As with the Windows exe,
-`config.json` and the autostart entry are written next to wherever the
-binary lives.
-
-Setup, the tray menu (Show status / Sync now / Open data folder /
-Reconfigure… / Quit), and the status window are all the same as the
-Windows version above — same OAuth Token + SP Access Token flow, same
-`keep_sync_core.py` sync logic. "Start automatically" writes an XDG
-autostart entry to `~/.config/autostart/keep-sync-tray.desktop` instead of
-a registry key.
-
-One caveat: double-click-to-open-status isn't guaranteed on every Linux
-desktop — some tray implementations (including Plasma, depending on
-version) don't reliably distinguish single vs. double clicks over
-StatusNotifierItem. Right-click → **Show status** always works regardless.
-
-## Scheduling (CLI daemon)
-
-This section is for `keep_sync_daemon.py` run via an external scheduler.
-If you're using the Windows tray app above, skip this — it schedules
-itself.
-
-Pick an interval that matches how quickly you want cross-side edits to
-converge; every 5 minutes is a reasonable default. The SP desktop app must
-be running when the pass fires for it to touch the SP side.
-
-**cron** (every 5 minutes):
+**cron:**
 ```cron
-*/5 * * * * cd /path/to/keep-sync-daemon && KEEP_MASTER_TOKEN=... .venv/bin/python keep_sync_daemon.py >> ~/.sp-keep-sync/daemon.log 2>&1
+*/5 * * * * cd /path/to/keep-sync-daemon && .venv/bin/python keep_sync_daemon.py >> ~/.sp-keep-sync/daemon.log 2>&1
 ```
-(Omit `KEEP_MASTER_TOKEN=...` if you stored the token in `master_token` instead.)
 
-**systemd timer** (Linux): create `~/.config/systemd/user/keep-sync.service`
-and a matching `.timer` with `OnUnitActiveSec=5min`, then
-`systemctl --user enable --now keep-sync.timer`.
+**systemd timer:** a `keep-sync.service` + `.timer` with `OnUnitActiveSec=5min`,
+then `systemctl --user enable --now keep-sync.timer`.
 
-**launchd** (macOS) / **Task Scheduler** (Windows): point either at
-`.venv/bin/python keep_sync_daemon.py --config /path/to/config.json` on the
-same interval.
+**launchd / Task Scheduler:** point at
+`.venv/bin/python keep_sync_daemon.py --config /path/to/config.json`.
 
-## Known rough edges
+## Rough edges
 
-- `gkeepapi` is unofficial and reverse-engineered; Google occasionally
-  changes internals or throws CAPTCHA/`LoginException` challenges at logins
-  it finds suspicious. If the daemon starts failing, re-run
-  `get_master_token.py` to mint a fresh token.
-- Only flat checklist items are synced (no nested/indented sub-items) — see
-  the top-level project README for why.
-- Blank Keep checklist lines (empty rows) are ignored — SP rejects an empty
-  task title, so they're skipped until they contain text.
-- Trashed notes are always skipped; archived notes are skipped unless
-  `"include_archived": true` is set in `config.json`.
-- If SP isn't running (or the local REST API is off), a pass fails cleanly
-  with an "unreachable" error and changes nothing until SP is back.
-- The Keep-item ↔ SP-task mapping lives in `<state_dir>/item_map.json`. If
-  you delete a Keep list and recreate it with the same title, the mapping
-  is stale — clear that file (or the relevant note-id entry) to re-pair.
+- If `gkeepapi` starts failing, re-run `get_master_token.py` for a fresh token.
+- Only flat checklist items sync (no nested sub-items). Blank lines are ignored
+  (SP rejects empty titles). Trashed notes are always skipped; archived notes
+  need `"include_archived": true`.
+- Delete and recreate a Keep list with the same title and the mapping goes
+  stale — clear `<state_dir>/item_map.json` to re-pair.
