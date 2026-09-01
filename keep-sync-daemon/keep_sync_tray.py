@@ -405,16 +405,19 @@ class TrayApp:
         self.status = "Starting..."
         self.status_window_open = threading.Event()
 
-        self.icon = pystray.Icon(
+        self.icon = self._build_icon()
+
+    def _build_icon(self):
+        return self.pystray.Icon(
             APP_NAME,
             make_icon_image(),
-            f"{APP_NAME} — starting…",
-            menu=pystray.Menu(
-                pystray.MenuItem("Show status", self._show_status_window, default=True),
-                pystray.MenuItem("Sync now", self._sync_now),
-                pystray.MenuItem("Open data folder", self._open_data_folder),
-                pystray.MenuItem("Reconfigure…", self._reconfigure),
-                pystray.MenuItem("Quit", self._quit),
+            f"{APP_NAME} — {self.status}"[:127],
+            menu=self.pystray.Menu(
+                self.pystray.MenuItem("Show status", self._show_status_window, default=True),
+                self.pystray.MenuItem("Sync now", self._sync_now),
+                self.pystray.MenuItem("Open data folder", self._open_data_folder),
+                self.pystray.MenuItem("Reconfigure…", self._reconfigure),
+                self.pystray.MenuItem("Quit", self._quit),
             ),
         )
 
@@ -507,7 +510,28 @@ class TrayApp:
     def run(self) -> None:
         threading.Thread(target=self._scheduler_loop, daemon=True, name="scheduler").start()
         log.info("scheduler started; entering tray event loop")
-        self.icon.run()  # blocks until self.icon.stop() is called
+        # The Windows notification-area COM channel can drop (Explorer
+        # restart, RDP reconnect, shell hang) -> pystray's mainloop dies
+        # with RPC_E_DISCONNECTED (0x80010108). Rebuild the icon and carry
+        # on rather than letting the whole app fall over.
+        fails = 0
+        while not self.stop_event.is_set() and not self.reconfigure_requested:
+            try:
+                self.icon.run()  # blocks until self.icon.stop() is called
+                break  # clean stop (Quit / Reconfigure)
+            except Exception:
+                fails += 1
+                log.exception("tray icon loop crashed (%d)", fails)
+                if fails >= 5:
+                    raise  # give up; __main__ logs it and the relaunch cap applies
+                self.stop_event.wait(3)
+                if self.stop_event.is_set() or self.reconfigure_requested:
+                    break
+                try:
+                    self.icon = self._build_icon()
+                except Exception:
+                    log.exception("could not rebuild tray icon")
+                    raise
         log.info("tray event loop exited")
 
 

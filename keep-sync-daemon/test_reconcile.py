@@ -330,6 +330,54 @@ class SPClientAddTaskTests(unittest.TestCase):
         self.assertNotIn("tagIds", seen["json"])
 
 
+class GoogleCacheGuardTests(unittest.TestCase):
+    def _tmp(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        return __import__("pathlib").Path(d) / "google_sync_cache.json"
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(core.load_google_state_cache(self._tmp()))
+
+    def test_valid_small_cache_loads(self):
+        p = self._tmp()
+        p.write_text('{"a": 1}', encoding="utf-8")
+        self.assertEqual(core.load_google_state_cache(p), {"a": 1})
+
+    def test_corrupt_cache_is_discarded(self):
+        p = self._tmp()
+        p.write_text("{not json", encoding="utf-8")
+        self.assertIsNone(core.load_google_state_cache(p))
+        self.assertFalse(p.exists())  # poison file removed so it can't crash next launch
+
+    def test_oversized_cache_is_ignored_and_removed(self):
+        p = self._tmp()
+        p.write_text("[]" + " " * (core.GOOGLE_CACHE_MAX_BYTES + 1), encoding="utf-8")
+        self.assertIsNone(core.load_google_state_cache(p))
+        self.assertFalse(p.exists())
+
+    def test_write_skips_oversized_dump(self):
+        p = self._tmp()
+
+        class HugeKeep:
+            def dump(self):
+                return {"x": "y" * (core.GOOGLE_CACHE_MAX_BYTES + 100)}
+
+        core.write_google_state_cache(p, HugeKeep())
+        self.assertFalse(p.exists())
+
+    def test_write_persists_small_dump(self):
+        p = self._tmp()
+
+        class TinyKeep:
+            def dump(self):
+                return {"cursor": "abc"}
+
+        core.write_google_state_cache(p, TinyKeep())
+        self.assertEqual(core.load_google_state_cache(p), {"cursor": "abc"})
+
+
 class VersionTests(unittest.TestCase):
     def test_returns_non_empty_string(self):
         v = core.get_version()
