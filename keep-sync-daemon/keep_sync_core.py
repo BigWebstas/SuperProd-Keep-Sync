@@ -80,20 +80,25 @@ def _enable_faulthandler(path: Path, logger: logging.Logger) -> None:
     """Dump a native traceback (segfault, SIGABRT, C-level crash in Qt/Tk)
     to `path` — the one class of crash that never reaches sys.excepthook,
     so otherwise nothing is written anywhere. On POSIX, SIGUSR1 also
-    triggers an on-demand all-threads dump (`kill -USR1 <pid>`)."""
+    triggers an on-demand all-threads dump (`kill -USR1 <pid>`).
+
+    Best-effort: anything going wrong here (a PyInstaller --windowed build
+    with no usable stderr, a locked file) must not take the app down, so
+    every failure is swallowed after a warning."""
     global _fault_log_handle
     try:
-        _fault_log_handle = open(path, "a", buffering=1, encoding="utf-8")
+        _fault_log_handle = open(path, "a", encoding="utf-8")
         _fault_log_handle.write(
             f"\n=== faulthandler armed {datetime.now(timezone.utc).isoformat()} "
             f"pid={os.getpid()} ===\n"
         )
+        _fault_log_handle.flush()
         faulthandler.enable(file=_fault_log_handle, all_threads=True)
         if hasattr(faulthandler, "register") and hasattr(signal, "SIGUSR1"):
             faulthandler.register(
                 signal.SIGUSR1, file=_fault_log_handle, all_threads=True, chain=False
             )
-    except (OSError, RuntimeError, ValueError):
+    except Exception:
         logger.warning("could not enable faulthandler", exc_info=True)
 
 
@@ -117,6 +122,10 @@ def setup_logging(log_path: Path, relaunch_on_crash: bool = False) -> logging.Lo
     before the default handler runs. The CLI daemon leaves this off; it's
     meant to be supervised by cron/systemd.
 
+    Never raises: a --windowed PyInstaller build with no console gives a
+    partial/None stdio, and a broken logging setup must not be what takes
+    the app down. Anything past the rotating file handler is best-effort.
+
     Idempotent: a second call only re-applies the log level."""
     import threading
 
@@ -127,13 +136,18 @@ def setup_logging(log_path: Path, relaunch_on_crash: bool = False) -> logging.Lo
 
     if getattr(logger, "_keep_sync_configured", False):
         return logger
+    logger._keep_sync_configured = True
 
-    log_dir = _first_writable_dir([
-        log_path.parent,
-        Path(os.path.expanduser(DEFAULT_STATE_DIR)),
-        Path(tempfile.gettempdir()),
-    ])
+    try:
+        log_dir = _first_writable_dir([
+            log_path.parent,
+            Path(os.path.expanduser(DEFAULT_STATE_DIR)),
+            Path(tempfile.gettempdir()),
+        ])
+    except Exception:
+        log_dir = Path(tempfile.gettempdir())
     resolved = log_dir / log_path.name
+    logger.log_path = resolved
     fmt = logging.Formatter(_LOG_FORMAT)
 
     try:
@@ -145,12 +159,24 @@ def setup_logging(log_path: Path, relaunch_on_crash: bool = False) -> logging.Lo
     except OSError:
         pass  # stderr handler below is still better than nothing
 
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(fmt)
-    logger.addHandler(stream_handler)
+    # Only when there's a real stream to write to — a --windowed frozen
+    # build has sys.stderr = None, and StreamHandler(None) just raises on
+    # every emit.
+    if sys.stderr is not None:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(fmt)
+        logger.addHandler(stream_handler)
 
-    logger.log_path = resolved
-    _enable_faulthandler(resolved.with_suffix(".fault.log"), logger)
+    # The self-test build must never fork-bomb itself: a crash there would
+    # relaunch -> crash -> relaunch and hang CI on the modal PyInstaller
+    # error dialog.
+    if _env_flag("KEEP_SYNC_TRAY_SELFTEST"):
+        relaunch_on_crash = False
+
+    try:
+        _enable_faulthandler(resolved.with_name(resolved.stem + ".fault.log"), logger)
+    except Exception:
+        logger.warning("faulthandler setup failed", exc_info=True)
 
     def log_uncaught(exc_type, exc_value, exc_tb):
         logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
@@ -169,10 +195,9 @@ def setup_logging(log_path: Path, relaunch_on_crash: bool = False) -> logging.Lo
     sys.excepthook = log_uncaught
     threading.excepthook = log_uncaught_thread
 
-    logger._keep_sync_configured = True
     logger.info(
         "logging up: pid=%s python=%s platform=%s frozen=%s debug=%s log=%s",
-        os.getpid(), platform.python_version(), platform.platform(),
+        os.getpid(), platform.python_version(), sys.platform,
         getattr(sys, "frozen", False), debug, resolved,
     )
     if resolved != log_path:
