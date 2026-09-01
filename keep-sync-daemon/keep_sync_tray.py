@@ -480,17 +480,24 @@ def run_selftest() -> int:
     missing DLLs, bad pystray kwargs), not UX issues."""
     import tempfile
 
+    def step(msg):
+        print(f"SELFTEST: {msg}", flush=True)
+
+    step("start")
     make_icon_image()
+    step("icon built")
     root = tk.Tk()
     root.withdraw()
     root.destroy()
+    step("tkinter ok")
 
     # Builds the real menu (incl. the default/double-click item) without
     # calling icon.run(), which would block waiting for a live tray.
     with tempfile.TemporaryDirectory() as tmp:
         TrayApp({"email": "selftest@example.com", "state_dir": tmp})
+    step("tray app built")
 
-    print("SELFTEST OK")
+    print("SELFTEST OK", flush=True)
     return 0
 
 

@@ -30,16 +30,25 @@ jobs:
         timeout-minutes: 3
         env:
           KEEP_SYNC_TRAY_SELFTEST: "1"
-        # A --windowed (GUI-subsystem) exe isn't reliably waited on by
-        # PowerShell's native-command invocation, so $LASTEXITCODE can be
-        # checked before it actually finishes. Start-Process -Wait -PassThru
-        # blocks on the process handle directly and gives a trustworthy exit code.
-        # -Wait can hang forever if the exe pops a modal error dialog, so this
-        # step has its own short timeout on top of the job one.
+        # A --windowed (GUI-subsystem) exe has no reliable console stdio and
+        # can pop a modal error dialog that blocks forever, so: start it
+        # detached, wait with our own timeout, kill it if it overruns, and
+        # ALWAYS dump every log (the redirected streams plus the app's own
+        # keep_sync_tray.log / .fault.log) so a hang is still diagnosable.
         run: |
-          $proc = Start-Process -FilePath ".\dist\KeepSyncTray.exe" -Wait -PassThru `
+          $proc = Start-Process -FilePath ".\dist\KeepSyncTray.exe" -PassThru `
             -RedirectStandardOutput selftest-stdout.log -RedirectStandardError selftest-stderr.log
-          Get-Content selftest-stdout.log, selftest-stderr.log -ErrorAction SilentlyContinue
+          $done = $proc.WaitForExit(90000)
+          if (-not $done) { try { $proc.Kill($true) } catch {} }
+          Write-Host "=== selftest-stdout.log ==="
+          Get-Content selftest-stdout.log -ErrorAction SilentlyContinue
+          Write-Host "=== selftest-stderr.log ==="
+          Get-Content selftest-stderr.log -ErrorAction SilentlyContinue
+          Write-Host "=== dist\keep_sync_tray.log ==="
+          Get-Content dist\keep_sync_tray.log -ErrorAction SilentlyContinue
+          Write-Host "=== dist\keep_sync_tray.fault.log ==="
+          Get-Content dist\keep_sync_tray.fault.log -ErrorAction SilentlyContinue
+          if (-not $done) { throw "KeepSyncTray.exe self-test did not exit within 90s" }
           if ($proc.ExitCode -ne 0) {
             throw "KeepSyncTray.exe self-test exited with code $($proc.ExitCode)"
           }
