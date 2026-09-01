@@ -237,11 +237,14 @@ def install_qt_message_handler(logger: "logging.Logger | None" = None) -> bool:
 
 
 def log_callback_errors(label: str, reraise: bool = False):
-    """Decorator for GUI slot / tray-menu callback bodies. An exception
-    raised inside a Qt slot or a pystray menu handler otherwise either
-    takes the whole tray process down or is silently swallowed by the
-    toolkit — either way with nothing written. This logs it with a
-    traceback first (and by default swallows it so the tray survives)."""
+    """Decorator for a Qt slot or a background thread target: logs any
+    exception with a traceback (and by default swallows it so the tray
+    survives) instead of letting it vanish into the toolkit.
+
+    Do NOT put this on a pystray menu action -- pystray validates an
+    action by reading action.__code__.co_argcount, and this wrapper's
+    (*args, **kwargs) signature makes that 0, which pystray rejects with
+    ValueError. Guard the body with a plain try/except there instead."""
     def decorate(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):

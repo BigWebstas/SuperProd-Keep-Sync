@@ -405,16 +405,18 @@ class TrayApp:
             except Exception:
                 log.debug("tray notify failed", exc_info=True)  # not supported on every backend
 
-    @core.log_callback_errors("sync now")
+    # NB: pystray menu callbacks must NOT use @core.log_callback_errors --
+    # pystray inspects action.__code__.co_argcount and a (*args, **kwargs)
+    # wrapper fails its check with ValueError. Each body is guarded inline
+    # instead. They can also run on the same thread as icon.run(), so an
+    # uncaught exception here would take the whole tray down.
     def _sync_now(self, icon=None, item=None) -> None:
-        threading.Thread(target=self._run_sync, daemon=True, name="sync-now").start()
+        try:
+            threading.Thread(target=self._run_sync, daemon=True, name="sync-now").start()
+        except Exception:
+            log.exception("could not start sync thread")
 
-    @core.log_callback_errors("open data folder")
     def _open_data_folder(self, icon=None, item=None) -> None:
-        # pystray menu callbacks can run on the same thread as icon.run();
-        # an uncaught exception here would propagate out of that call and
-        # take the whole tray down with it, so every callback body is
-        # wrapped defensively (see also the scheduler loop below).
         try:
             state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
             state_dir.mkdir(parents=True, exist_ok=True)
@@ -423,11 +425,13 @@ class TrayApp:
         except Exception:
             log.exception("failed to open data folder")
 
-    @core.log_callback_errors("show status window")
     def _show_status_window(self, icon=None, item=None) -> None:
-        if self.status_window_open.is_set():
-            return  # already open — only one at a time
-        threading.Thread(target=self._run_status_window, daemon=True, name="status-window").start()
+        try:
+            if self.status_window_open.is_set():
+                return  # already open — only one at a time
+            threading.Thread(target=self._run_status_window, daemon=True, name="status-window").start()
+        except Exception:
+            log.exception("could not open status window")
 
     def _run_status_window(self) -> None:
         self.status_window_open.set()
@@ -438,18 +442,22 @@ class TrayApp:
         finally:
             self.status_window_open.clear()
 
-    @core.log_callback_errors("reconfigure")
     def _reconfigure(self, icon=None, item=None) -> None:
-        log.info("reconfigure requested")
-        self.reconfigure_requested = True
-        self.stop_event.set()
-        self.icon.stop()
+        try:
+            log.info("reconfigure requested")
+            self.reconfigure_requested = True
+            self.stop_event.set()
+            self.icon.stop()
+        except Exception:
+            log.exception("reconfigure failed")
 
-    @core.log_callback_errors("quit")
     def _quit(self, icon=None, item=None) -> None:
-        log.info("quit requested")
-        self.stop_event.set()
-        self.icon.stop()
+        try:
+            log.info("quit requested")
+            self.stop_event.set()
+            self.icon.stop()
+        except Exception:
+            log.exception("quit failed")
 
     def _scheduler_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -480,17 +488,24 @@ def run_selftest() -> int:
     missing DLLs, bad pystray kwargs), not UX issues."""
     import tempfile
 
+    def step(msg):
+        print(f"SELFTEST: {msg}", flush=True)
+
+    step("start")
     make_icon_image()
+    step("icon built")
     root = tk.Tk()
     root.withdraw()
     root.destroy()
+    step("tkinter ok")
 
     # Builds the real menu (incl. the default/double-click item) without
     # calling icon.run(), which would block waiting for a live tray.
     with tempfile.TemporaryDirectory() as tmp:
         TrayApp({"email": "selftest@example.com", "state_dir": tmp})
+    step("tray app built")
 
-    print("SELFTEST OK")
+    print("SELFTEST OK", flush=True)
     return 0
 
 
