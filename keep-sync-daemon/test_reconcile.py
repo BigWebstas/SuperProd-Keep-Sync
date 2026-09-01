@@ -258,5 +258,33 @@ class CrashRelaunchDecisionTests(unittest.TestCase):
         self.assertEqual(updates[self.COUNT], "1")
 
 
+class LogCallbackErrorsTests(unittest.TestCase):
+    """core.log_callback_errors: swallow + log by default, re-raise on ask."""
+
+    def test_swallows_and_returns_none(self):
+        @core.log_callback_errors("boom")
+        def f():
+            raise ValueError("nope")
+
+        with self.assertLogs(core.LOGGER_NAME, level="ERROR"):
+            self.assertIsNone(f())
+
+    def test_passes_through_return_value(self):
+        @core.log_callback_errors("ok")
+        def f(a, b):
+            return a + b
+
+        self.assertEqual(f(2, 3), 5)
+
+    def test_reraise_option(self):
+        @core.log_callback_errors("boom", reraise=True)
+        def f():
+            raise ValueError("nope")
+
+        with self.assertLogs(core.LOGGER_NAME, level="ERROR"):
+            with self.assertRaises(ValueError):
+                f()
+
+
 if __name__ == "__main__":
     unittest.main()
