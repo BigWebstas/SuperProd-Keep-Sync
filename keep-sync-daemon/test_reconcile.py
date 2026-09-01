@@ -9,6 +9,7 @@ no network, no real SP app).
 from __future__ import annotations
 
 import unittest
+import unittest.mock
 
 import gkeepapi.node
 
@@ -376,6 +377,27 @@ class GoogleCacheGuardTests(unittest.TestCase):
 
         core.write_google_state_cache(p, TinyKeep())
         self.assertEqual(core.load_google_state_cache(p), {"cursor": "abc"})
+
+    def test_gc_is_re_enabled_after_load(self):
+        import gc
+        p = self._tmp()
+        p.write_text('{"a": 1}', encoding="utf-8")
+        self.assertTrue(gc.isenabled())
+        core.load_google_state_cache(p)
+        self.assertTrue(gc.isenabled())
+
+    def test_env_kill_switch_disables_cache(self):
+        p = self._tmp()
+        p.write_text('{"a": 1}', encoding="utf-8")
+        with unittest.mock.patch.dict("os.environ", {core.NO_GOOGLE_CACHE_ENV: "1"}):
+            self.assertIsNone(core.load_google_state_cache(p))
+
+            class K:
+                def dump(self):
+                    return {"x": 1}
+
+            core.write_google_state_cache(p, K())
+        self.assertFalse(p.exists())
 
 
 class VersionTests(unittest.TestCase):

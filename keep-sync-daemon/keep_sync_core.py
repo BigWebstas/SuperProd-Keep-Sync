@@ -18,8 +18,10 @@ propagate either way.
 """
 from __future__ import annotations
 
+import contextlib
 import faulthandler
 import functools
+import gc
 import json
 import logging
 import logging.handlers
@@ -470,16 +472,33 @@ def save_master_token(state_dir: Path, master_token: str) -> Path:
     return token_path
 
 
-# gkeepapi's sync-cursor cache is the whole account's node graph. For a big
-# Keep account it can run to many MB, and parsing/serialising that giant blob
-# has been implicated in hard crashes (a breakpoint fault mid-decode). It's
-# only an optimisation -- skipping it just means more Google login challenges
-# -- so past this size we don't touch it.
+# gkeepapi's sync-cursor cache is the whole account's node graph. It's only an
+# optimisation -- skipping it just means more Google login challenges. Past this
+# size we don't touch it; set KEEP_SYNC_NO_GOOGLE_CACHE=1 to disable it entirely.
 GOOGLE_CACHE_MAX_BYTES = 3_000_000
+NO_GOOGLE_CACHE_ENV = "KEEP_SYNC_NO_GOOGLE_CACHE"
+
+
+@contextlib.contextmanager
+def _gc_paused():
+    """Hold the cyclic GC off for a block. A GC pass firing inside the _json
+    C decoder while it parses the multi-thousand-node account graph has
+    crashed the frozen Windows build with a breakpoint fault (0x80000003
+    "Garbage-collecting" mid raw_decode). Pausing GC for the parse/serialise
+    removes that window."""
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_enabled:
+            gc.enable()
 
 
 def load_google_state_cache(cache_path: Path):
     log = logging.getLogger(LOGGER_NAME)
+    if _env_flag(NO_GOOGLE_CACHE_ENV):
+        return None
     if not cache_path.exists():
         return None
     try:
@@ -491,8 +510,9 @@ def load_google_state_cache(cache_path: Path):
             )
             _discard_google_cache(cache_path)
             return None
-        with cache_path.open("r", encoding="utf-8") as fh:
-            return json.load(fh)
+        text = cache_path.read_text(encoding="utf-8")
+        with _gc_paused():
+            return json.loads(text)
     except (json.JSONDecodeError, OSError, ValueError):
         log.warning("google_sync_cache.json unreadable -- discarding it", exc_info=True)
         _discard_google_cache(cache_path)
@@ -511,8 +531,12 @@ def write_google_state_cache(cache_path: Path, keep: "gkeepapi.Keep") -> None:
     it comes out under GOOGLE_CACHE_MAX_BYTES -- otherwise drop it (see the
     note on that constant). Never raises; the cache is optional."""
     log = logging.getLogger(LOGGER_NAME)
+    if _env_flag(NO_GOOGLE_CACHE_ENV):
+        _discard_google_cache(cache_path)
+        return
     try:
-        blob = json.dumps(keep.dump(), separators=(",", ":"))
+        with _gc_paused():
+            blob = json.dumps(keep.dump(), separators=(",", ":"))
     except Exception:
         log.warning("could not serialise Google sync cache", exc_info=True)
         return
