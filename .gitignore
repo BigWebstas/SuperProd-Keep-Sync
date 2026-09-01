@@ -15,3 +15,4 @@ keep-sync-daemon/*.spec
 master_token
 */master_token
 CLAUDE.md
+.idea/
