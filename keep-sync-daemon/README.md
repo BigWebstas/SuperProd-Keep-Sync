@@ -91,8 +91,13 @@ reach Python:
 | `keep_sync_daemon.py` | `<state_dir>/keep_sync_daemon.log` |
 
 - `KEEP_SYNC_DEBUG=1` in the environment switches the log to DEBUG detail.
+- The first log line (`logging up: version=… pid=… log=…`) records the running
+  version and the resolved log path. The tray "Show status" window shows the
+  version too.
 - On Linux, `kill -USR1 <pid>` dumps a stack trace of every thread to the
-  `*.fault.log` without stopping the app.
+  `*.fault.log` without stopping the app. A `SIGTERM` / `SIGHUP` (logout,
+  `systemctl --user stop`, `killall`) also dumps there before the process dies.
+  A `SIGKILL` / OOM kill can't be caught — check `journalctl` / `coredumpctl`.
 - The Qt tray also routes Qt's own warnings (`Qt: ...` lines) into the log, and
   crashes inside a tray menu action are logged with a traceback instead of
   taking the tray down silently.

@@ -12,6 +12,8 @@ jobs:
         working-directory: keep-sync-daemon
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need tags for `git describe` in the version stamp
 
       - uses: actions/setup-python@v5
         with:
@@ -20,10 +22,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-windows.txt
 
+      - name: Stamp version
+        run: |
+          python -c "import subprocess,pathlib; v=subprocess.run(['git','describe','--tags','--always'],capture_output=True,text=True).stdout.strip() or 'unknown'; pathlib.Path('_keep_sync_version.py').write_text('__version__ = %r\n' % v); print('version:', v)"
+
       - name: Build exe
         run: >-
           pyinstaller --onefile --windowed --name KeepSyncTray
           --copy-metadata gpsoauth --copy-metadata gkeepapi
+          --hidden-import _keep_sync_version
           keep_sync_tray.py
 
       - name: Self-test the built exe
@@ -67,6 +74,8 @@ jobs:
         working-directory: keep-sync-daemon
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need tags for `git describe` in the version stamp
 
       - uses: actions/setup-python@v5
         with:
@@ -85,10 +94,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-linux.txt
 
+      - name: Stamp version
+        run: |
+          python -c "import subprocess,pathlib; v=subprocess.run(['git','describe','--tags','--always'],capture_output=True,text=True).stdout.strip() or 'unknown'; pathlib.Path('_keep_sync_version.py').write_text('__version__ = %r\n' % v); print('version:', v)"
+
       - name: Build binary
         run: >-
           pyinstaller --onefile --name KeepSyncTrayQt
           --copy-metadata gpsoauth --copy-metadata gkeepapi
+          --hidden-import _keep_sync_version
           keep_sync_tray_qt.py
 
       - name: Self-test the built binary
