@@ -79,6 +79,24 @@ project → set an interval → optionally "start at login" (per-user, no admin)
 folder, Reconfigure, and Quit. `config.json` and the autostart entry are written
 next to the binary, so keep it in a stable folder.
 
+## Logs
+
+Every entry point writes a rotating log (10MB × 3) and, beside it, a
+`*.fault.log` that captures native crashes (segfaults, `SIGABRT`) that never
+reach Python:
+
+| Entry point | Log file |
+| --- | --- |
+| `keep_sync_tray_qt.py` / `keep_sync_tray.py` | next to the binary, e.g. `keep_sync_tray_qt.log` (falls back to `<state_dir>/` then the temp dir if that folder is read-only — the startup line names the path it chose) |
+| `keep_sync_daemon.py` | `<state_dir>/keep_sync_daemon.log` |
+
+- `KEEP_SYNC_DEBUG=1` in the environment switches the log to DEBUG detail.
+- On Linux, `kill -USR1 <pid>` dumps a stack trace of every thread to the
+  `*.fault.log` without stopping the app.
+- The Qt tray also routes Qt's own warnings (`Qt: ...` lines) into the log, and
+  crashes inside a tray menu action are logged with a traceback instead of
+  taking the tray down silently.
+
 ## Scheduling the CLI daemon
 
 Pick an interval matching how fast you want edits to converge; every 5 minutes is

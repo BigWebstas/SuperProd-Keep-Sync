@@ -18,11 +18,16 @@ propagate either way.
 """
 from __future__ import annotations
 
+import faulthandler
+import functools
 import json
 import logging
 import logging.handlers
 import os
+import platform
+import signal
 import stat
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -36,31 +41,120 @@ import sp_client
 
 LOGGER_NAME = "keep_sync"
 
+DEBUG_ENV = "KEEP_SYNC_DEBUG"
+_LOG_FORMAT = "%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s"
+_fault_log_handle = None  # kept open for the process lifetime; faulthandler writes here
+
+
+def _env_flag(name: str) -> bool:
+    """True unless the env var is unset or an obvious "off" value."""
+    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _first_writable_dir(candidates: "list[Path]") -> Path:
+    """First candidate we can create and write a probe file into. A frozen
+    tray app dropped in a read-only location (/opt, Program Files) can't
+    write next to its own binary — falling back keeps a log instead of the
+    logging setup itself becoming the unlogged crash."""
+    for d in candidates:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            probe = d / ".keep_sync_write_test"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink()
+            return d
+        except OSError:
+            continue
+    return Path(tempfile.gettempdir())
+
+
+def _flush_logger(logger: logging.Logger) -> None:
+    for h in logger.handlers:
+        try:
+            h.flush()
+        except Exception:
+            pass
+
+
+def _enable_faulthandler(path: Path, logger: logging.Logger) -> None:
+    """Dump a native traceback (segfault, SIGABRT, C-level crash in Qt/Tk)
+    to `path` — the one class of crash that never reaches sys.excepthook,
+    so otherwise nothing is written anywhere. On POSIX, SIGUSR1 also
+    triggers an on-demand all-threads dump (`kill -USR1 <pid>`)."""
+    global _fault_log_handle
+    try:
+        _fault_log_handle = open(path, "a", buffering=1, encoding="utf-8")
+        _fault_log_handle.write(
+            f"\n=== faulthandler armed {datetime.now(timezone.utc).isoformat()} "
+            f"pid={os.getpid()} ===\n"
+        )
+        faulthandler.enable(file=_fault_log_handle, all_threads=True)
+        if hasattr(faulthandler, "register") and hasattr(signal, "SIGUSR1"):
+            faulthandler.register(
+                signal.SIGUSR1, file=_fault_log_handle, all_threads=True, chain=False
+            )
+    except (OSError, RuntimeError, ValueError):
+        logger.warning("could not enable faulthandler", exc_info=True)
+
 
 def setup_logging(log_path: Path, relaunch_on_crash: bool = False) -> logging.Logger:
-    """Configures the shared "keep_sync" logger to write to log_path (a
-    10MB x 3 rotating file, 40MB ceiling) and installs sys.excepthook /
-    threading.excepthook so uncaught exceptions get logged instead of
-    vanishing — the tray apps are --windowed builds with no console, so a
-    log file is the only place errors are visible at all.
+    """Configures the shared "keep_sync" logger and the process-wide crash
+    hooks. The tray apps are --windowed builds with no console, so the log
+    file (and the sibling .fault.log) is the only place any error is
+    visible.
+
+    Writes to `log_path` (10MB x 3 rotating, 40MB ceiling) if its directory
+    is writable, else falls back to <DEFAULT_STATE_DIR> then the temp dir;
+    the resolved path is `logger.log_path`. Also adds a stderr handler (for
+    terminal runs), arms faulthandler for native crashes, and installs
+    sys.excepthook / threading.excepthook so uncaught Python exceptions are
+    logged with a traceback instead of vanishing. Set KEEP_SYNC_DEBUG=1 for
+    DEBUG-level output.
 
     relaunch_on_crash: when set (the tray apps do), a crash that reaches
     sys.excepthook — e.g. one Qt routed out of a slot rather than letting
     propagate to __main__ — re-execs the process via relaunch_after_crash()
     before the default handler runs. The CLI daemon leaves this off; it's
-    meant to be supervised by cron/systemd."""
-    import sys
+    meant to be supervised by cron/systemd.
+
+    Idempotent: a second call only re-applies the log level."""
     import threading
 
+    log_path = Path(log_path)
     logger = logging.getLogger(LOGGER_NAME)
-    logger.setLevel(logging.INFO)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    handler = logging.handlers.RotatingFileHandler(log_path, maxBytes=10_000_000, backupCount=3, encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(threadName)s] %(message)s"))
-    logger.addHandler(handler)
+    debug = _env_flag(DEBUG_ENV)
+    logger.setLevel(logging.DEBUG if debug else logging.INFO)
+
+    if getattr(logger, "_keep_sync_configured", False):
+        return logger
+
+    log_dir = _first_writable_dir([
+        log_path.parent,
+        Path(os.path.expanduser(DEFAULT_STATE_DIR)),
+        Path(tempfile.gettempdir()),
+    ])
+    resolved = log_dir / log_path.name
+    fmt = logging.Formatter(_LOG_FORMAT)
+
+    try:
+        file_handler = logging.handlers.RotatingFileHandler(
+            resolved, maxBytes=10_000_000, backupCount=3, encoding="utf-8"
+        )
+        file_handler.setFormatter(fmt)
+        logger.addHandler(file_handler)
+    except OSError:
+        pass  # stderr handler below is still better than nothing
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(fmt)
+    logger.addHandler(stream_handler)
+
+    logger.log_path = resolved
+    _enable_faulthandler(resolved.with_suffix(".fault.log"), logger)
 
     def log_uncaught(exc_type, exc_value, exc_tb):
         logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+        _flush_logger(logger)
         if relaunch_on_crash and not issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
             relaunch_after_crash(logger)  # no return unless the crash-loop cap is hit
         sys.__excepthook__(exc_type, exc_value, exc_tb)
@@ -70,10 +164,70 @@ def setup_logging(log_path: Path, relaunch_on_crash: bool = False) -> logging.Lo
             "Uncaught exception in thread %r", args.thread.name if args.thread else "?",
             exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
         )
+        _flush_logger(logger)
 
     sys.excepthook = log_uncaught
     threading.excepthook = log_uncaught_thread
+
+    logger._keep_sync_configured = True
+    logger.info(
+        "logging up: pid=%s python=%s platform=%s frozen=%s debug=%s log=%s",
+        os.getpid(), platform.python_version(), platform.platform(),
+        getattr(sys, "frozen", False), debug, resolved,
+    )
+    if resolved != log_path:
+        logger.warning("wanted log at %s but it wasn't writable; using %s", log_path, resolved)
     return logger
+
+
+def install_qt_message_handler(logger: "logging.Logger | None" = None) -> bool:
+    """Route Qt's own runtime messages — QObject warnings, tray/platform
+    plugin errors, "cannot create children for a parent in a different
+    thread" and friends — into the log. Without this they print to stderr,
+    which a --windowed build discards. No-op (returns False) if PySide6
+    isn't importable."""
+    logger = logger or logging.getLogger(LOGGER_NAME)
+    try:
+        from PySide6 import QtCore
+    except Exception:
+        return False
+
+    level_for = {
+        QtCore.QtMsgType.QtDebugMsg: logging.DEBUG,
+        QtCore.QtMsgType.QtInfoMsg: logging.INFO,
+        QtCore.QtMsgType.QtWarningMsg: logging.WARNING,
+        QtCore.QtMsgType.QtCriticalMsg: logging.ERROR,
+        QtCore.QtMsgType.QtFatalMsg: logging.CRITICAL,
+    }
+
+    def handler(msg_type, context, message):
+        where = ""
+        if context is not None and getattr(context, "file", None):
+            where = f" ({context.file}:{context.line})"
+        logger.log(level_for.get(msg_type, logging.WARNING), "Qt: %s%s", message, where)
+
+    QtCore.qInstallMessageHandler(handler)
+    logger.debug("Qt message handler installed")
+    return True
+
+
+def log_callback_errors(label: str, reraise: bool = False):
+    """Decorator for GUI slot / tray-menu callback bodies. An exception
+    raised inside a Qt slot or a pystray menu handler otherwise either
+    takes the whole tray process down or is silently swallowed by the
+    toolkit — either way with nothing written. This logs it with a
+    traceback first (and by default swallows it so the tray survives)."""
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception:
+                logging.getLogger(LOGGER_NAME).exception("error in %s", label)
+                if reraise:
+                    raise
+        return wrapper
+    return decorate
 
 
 # --- crash auto-relaunch -----------------------------------------------------
@@ -376,6 +530,10 @@ def reconcile_sp(cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", ite
 
     sp_tasks = {t.id: t for t in sp.list_tasks(project_id)}
     keep_items = {item.id: item for item in note.items}
+    log.debug(
+        "note %s (%r): %d Keep items, %d SP tasks, %d mapped",
+        note.id, note_title, len(keep_items), len(sp_tasks), len(note_map),
+    )
 
     # 1. Keep -> SP: update mapped tasks, create tasks for new items.
     for item in note.items:
@@ -508,6 +666,7 @@ def sync_once(cfg: dict) -> SyncResult:
         else:
             keep.authenticate(cfg["email"], master_token)
         keep.sync()
+        log.info("Keep authenticated and synced (cache_hit=%s)", bool(cached_state))
     except gkeepapi.exception.LoginException as e:
         log.error("Google login failed", exc_info=True)
         return SyncResult(
@@ -533,6 +692,8 @@ def sync_once(cfg: dict) -> SyncResult:
 
     push_error = None
     if result.keep_dirty:
+        log.info("pushing %d new + %d changed Keep item(s) back to Google",
+                 result.created_keep, result.updated_keep)
         try:
             keep.sync()
         except Exception as e:

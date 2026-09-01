@@ -366,6 +366,11 @@ class StatusDialog(QDialog):
 
 class TrayApp(QObject):
     status_changed = Signal(str)
+    # Emitted from the sync worker thread; the connected slot runs on the
+    # GUI thread. Touching QSystemTrayIcon off the main thread is undefined
+    # behaviour in Qt and can take the process down natively (no Python
+    # traceback), so every tray call goes through here.
+    notify = Signal(str, str)
 
     def __init__(self, cfg: dict):
         super().__init__()
@@ -379,17 +384,26 @@ class TrayApp(QObject):
         self.tray_icon.setToolTip(f"{APP_NAME} — starting…")
         self.tray_icon.activated.connect(self._on_activated)
 
-        menu = QMenu()
-        menu.addAction("Show status", self.show_status_window)
-        menu.addAction("Sync now", self.sync_now)
-        menu.addAction("Open data folder", self.open_data_folder)
-        menu.addAction("Reconfigure…", self.reconfigure)
-        menu.addSeparator()
-        menu.addAction("Quit", self.quit)
-        self.tray_icon.setContextMenu(menu)
+        # Held on the instance on purpose: QSystemTrayIcon.setContextMenu()
+        # does not take ownership, so a menu left as a local would be GC'd
+        # and right-clicking the tray icon would crash into freed memory.
+        self._menu = QMenu()
+        self._menu.addAction("Show status", self.show_status_window)
+        self._menu.addAction("Sync now", self.sync_now)
+        self._menu.addAction("Open data folder", self.open_data_folder)
+        self._menu.addAction("Reconfigure…", self.reconfigure)
+        self._menu.addSeparator()
+        self._menu.addAction("Quit", self.quit)
+        self.tray_icon.setContextMenu(self._menu)
 
         self.status_changed.connect(self._update_tooltip)
+        self.notify.connect(self._show_notification)
 
+    @core.log_callback_errors("tray notification")
+    def _show_notification(self, title: str, message: str) -> None:
+        self.tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Warning)
+
+    @core.log_callback_errors("tray activated")
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         # DoubleClick fires reliably on some Linux desktops but not all —
         # Plasma's StatusNotifierItem protocol doesn't guarantee it, so
@@ -397,9 +411,11 @@ class TrayApp(QObject):
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.show_status_window()
 
+    @core.log_callback_errors("tooltip update")
     def _update_tooltip(self, text: str) -> None:
         self.tray_icon.setToolTip(f"{APP_NAME} — {text}")
 
+    @core.log_callback_errors("show status window")
     def show_status_window(self) -> None:
         if self._status_dialog is None:
             self._status_dialog = StatusDialog(self)
@@ -411,18 +427,25 @@ class TrayApp(QObject):
     def _on_status_dialog_closed(self) -> None:
         self._status_dialog = None
 
+    @core.log_callback_errors("sync run")
     def _run_sync(self) -> None:
+        start = time.monotonic()
+        log.info("sync run starting")
         result = core.sync_once(self.cfg)
+        elapsed = time.monotonic() - start
         ts = time.strftime("%H:%M:%S")
         text = f"{'OK' if result.ok else 'error'} @ {ts}: {result.message}"
         self.status = text
         self.status_changed.emit(text)
+        log.info("sync run done in %.1fs: ok=%s %s", elapsed, result.ok, result.message)
         if not result.ok:
-            self.tray_icon.showMessage(f"{APP_NAME} sync failed", result.message, QSystemTrayIcon.MessageIcon.Warning)
+            self.notify.emit(f"{APP_NAME} sync failed", result.message)
 
+    @core.log_callback_errors("sync now")
     def sync_now(self) -> None:
-        threading.Thread(target=self._run_sync, daemon=True).start()
+        threading.Thread(target=self._run_sync, daemon=True, name="sync-now").start()
 
+    @core.log_callback_errors("open data folder")
     def open_data_folder(self) -> None:
         try:
             state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
@@ -433,8 +456,9 @@ class TrayApp(QObject):
 
     def start_scheduler(self) -> None:
         self.stop_event.clear()
-        self._scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
+        self._scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True, name="scheduler")
         self._scheduler_thread.start()
+        log.info("scheduler started")
 
     def stop_scheduler(self) -> None:
         self.stop_event.set()
@@ -448,8 +472,11 @@ class TrayApp(QObject):
                 # permanently kill background syncing for every other note.
                 log.exception("sync raised unexpectedly; will retry next interval")
             interval_minutes = max(1, int(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES)))
+            log.debug("scheduler sleeping %d min until next sync", interval_minutes)
             self.stop_event.wait(interval_minutes * 60)
+        log.info("scheduler loop stopped")
 
+    @core.log_callback_errors("reconfigure")
     def reconfigure(self) -> None:
         log.info("reconfigure requested")
         self.stop_scheduler()
@@ -458,6 +485,7 @@ class TrayApp(QObject):
             self.cfg = new_cfg
         self.start_scheduler()
 
+    @core.log_callback_errors("quit")
     def quit(self) -> None:
         log.info("quit requested")
         self.stop_scheduler()
@@ -490,8 +518,18 @@ def run_selftest() -> int:
 
 def main() -> int:
     log.info("KeepSyncTrayQt starting (frozen=%s, dir=%s)", getattr(sys, "frozen", False), APP_DIR)
+    core.install_qt_message_handler(log)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    log.info(
+        "Qt up: platform=%s tray_available=%s session=%s desktop=%s wayland=%s",
+        app.platformName(),
+        QSystemTrayIcon.isSystemTrayAvailable(),
+        os.environ.get("XDG_SESSION_TYPE", "?"),
+        os.environ.get("XDG_CURRENT_DESKTOP", "?"),
+        bool(os.environ.get("WAYLAND_DISPLAY")),
+    )
+    app.aboutToQuit.connect(lambda: log.info("Qt aboutToQuit"))
 
     cfg = load_or_default_config()
     if needs_setup(cfg):
@@ -526,7 +564,8 @@ if __name__ == "__main__":
                 None,
                 APP_NAME,
                 f"{APP_NAME} keeps crashing and won't restart itself again.\n\n"
-                f"See {LOG_PATH} for details.",
+                f"See {getattr(log, 'log_path', LOG_PATH)} (and the sibling "
+                ".fault.log) for details.",
             )
         except Exception:
             pass

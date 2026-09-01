@@ -390,19 +390,26 @@ class TrayApp:
         self.status = text
         self.icon.title = f"{APP_NAME} — {text}"[:127]  # Windows tooltip length limit
 
+    @core.log_callback_errors("sync run")
     def _run_sync(self) -> None:
+        start = time.monotonic()
+        log.info("sync run starting")
         result = core.sync_once(self.cfg)
+        elapsed = time.monotonic() - start
         ts = time.strftime("%H:%M:%S")
         self._set_status(f"{'OK' if result.ok else 'error'} @ {ts}: {result.message}")
+        log.info("sync run done in %.1fs: ok=%s %s", elapsed, result.ok, result.message)
         if not result.ok:
             try:
                 self.icon.notify(result.message, f"{APP_NAME} sync failed")
             except Exception:
-                pass  # notifications aren't supported on every backend
+                log.debug("tray notify failed", exc_info=True)  # not supported on every backend
 
+    @core.log_callback_errors("sync now")
     def _sync_now(self, icon=None, item=None) -> None:
-        threading.Thread(target=self._run_sync, daemon=True).start()
+        threading.Thread(target=self._run_sync, daemon=True, name="sync-now").start()
 
+    @core.log_callback_errors("open data folder")
     def _open_data_folder(self, icon=None, item=None) -> None:
         # pystray menu callbacks can run on the same thread as icon.run();
         # an uncaught exception here would propagate out of that call and
@@ -416,10 +423,11 @@ class TrayApp:
         except Exception:
             log.exception("failed to open data folder")
 
+    @core.log_callback_errors("show status window")
     def _show_status_window(self, icon=None, item=None) -> None:
         if self.status_window_open.is_set():
             return  # already open — only one at a time
-        threading.Thread(target=self._run_status_window, daemon=True).start()
+        threading.Thread(target=self._run_status_window, daemon=True, name="status-window").start()
 
     def _run_status_window(self) -> None:
         self.status_window_open.set()
@@ -430,12 +438,14 @@ class TrayApp:
         finally:
             self.status_window_open.clear()
 
+    @core.log_callback_errors("reconfigure")
     def _reconfigure(self, icon=None, item=None) -> None:
         log.info("reconfigure requested")
         self.reconfigure_requested = True
         self.stop_event.set()
         self.icon.stop()
 
+    @core.log_callback_errors("quit")
     def _quit(self, icon=None, item=None) -> None:
         log.info("quit requested")
         self.stop_event.set()
@@ -450,11 +460,15 @@ class TrayApp:
                 # permanently kill background syncing for every other note.
                 log.exception("sync raised unexpectedly; will retry next interval")
             interval_minutes = max(1, int(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES)))
+            log.debug("scheduler sleeping %d min until next sync", interval_minutes)
             self.stop_event.wait(interval_minutes * 60)
+        log.info("scheduler loop stopped")
 
     def run(self) -> None:
-        threading.Thread(target=self._scheduler_loop, daemon=True).start()
+        threading.Thread(target=self._scheduler_loop, daemon=True, name="scheduler").start()
+        log.info("scheduler started; entering tray event loop")
         self.icon.run()  # blocks until self.icon.stop() is called
+        log.info("tray event loop exited")
 
 
 def run_selftest() -> int:
@@ -481,7 +495,10 @@ def run_selftest() -> int:
 
 
 def main() -> int:
-    log.info("KeepSyncTray starting (frozen=%s, dir=%s)", getattr(sys, "frozen", False), APP_DIR)
+    log.info(
+        "KeepSyncTray starting (frozen=%s, dir=%s, platform=%s)",
+        getattr(sys, "frozen", False), APP_DIR, sys.platform,
+    )
     cfg = load_or_default_config()
     force_setup = False
 
@@ -529,7 +546,8 @@ if __name__ == "__main__":
             messagebox.showerror(
                 APP_NAME,
                 f"{APP_NAME} keeps crashing and won't restart itself again.\n\n"
-                f"See {LOG_PATH} for details.",
+                f"See {getattr(log, 'log_path', LOG_PATH)} (and the sibling "
+                ".fault.log) for details.",
             )
         except Exception:
             pass
