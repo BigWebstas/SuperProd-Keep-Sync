@@ -92,6 +92,9 @@ reach Python:
 | `keep_sync_daemon.py` | `<state_dir>/keep_sync_daemon.log` |
 
 - `KEEP_SYNC_DEBUG=1` in the environment switches the log to DEBUG detail.
+- `KEEP_SYNC_NO_GOOGLE_CACHE=1` turns off the `google_sync_cache.json` optimisation
+  entirely (use if that file is implicated in a crash; costs more frequent Google
+  login challenges).
 - The first log line (`logging up: version=… pid=… log=…`) records the running
   version and the resolved log path. The tray "Show status" window shows the
   version too.
