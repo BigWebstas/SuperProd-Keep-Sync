@@ -470,14 +470,79 @@ def save_master_token(state_dir: Path, master_token: str) -> Path:
     return token_path
 
 
+# gkeepapi's sync-cursor cache is the whole account's node graph. For a big
+# Keep account it can run to many MB, and parsing/serialising that giant blob
+# has been implicated in hard crashes (a breakpoint fault mid-decode). It's
+# only an optimisation -- skipping it just means more Google login challenges
+# -- so past this size we don't touch it.
+GOOGLE_CACHE_MAX_BYTES = 3_000_000
+
+
 def load_google_state_cache(cache_path: Path):
+    log = logging.getLogger(LOGGER_NAME)
     if not cache_path.exists():
         return None
     try:
+        size = cache_path.stat().st_size
+        if size > GOOGLE_CACHE_MAX_BYTES:
+            log.warning(
+                "google_sync_cache.json is %d bytes (> %d) -- ignoring and removing it",
+                size, GOOGLE_CACHE_MAX_BYTES,
+            )
+            _discard_google_cache(cache_path)
+            return None
         with cache_path.open("r", encoding="utf-8") as fh:
             return json.load(fh)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, ValueError):
+        log.warning("google_sync_cache.json unreadable -- discarding it", exc_info=True)
+        _discard_google_cache(cache_path)
         return None
+
+
+def _discard_google_cache(cache_path: Path) -> None:
+    try:
+        cache_path.unlink()
+    except OSError:
+        pass
+
+
+def write_google_state_cache(cache_path: Path, keep: "gkeepapi.Keep") -> None:
+    """Serialise gkeepapi's sync state to `cache_path`, compact, but only if
+    it comes out under GOOGLE_CACHE_MAX_BYTES -- otherwise drop it (see the
+    note on that constant). Never raises; the cache is optional."""
+    log = logging.getLogger(LOGGER_NAME)
+    try:
+        blob = json.dumps(keep.dump(), separators=(",", ":"))
+    except Exception:
+        log.warning("could not serialise Google sync cache", exc_info=True)
+        return
+    if len(blob) > GOOGLE_CACHE_MAX_BYTES:
+        log.warning(
+            "Google sync cache would be %d bytes (> %d) -- not caching it",
+            len(blob), GOOGLE_CACHE_MAX_BYTES,
+        )
+        _discard_google_cache(cache_path)
+        return
+    try:
+        _atomic_write_text(cache_path, blob)
+    except OSError:
+        log.warning("could not write Google sync cache", exc_info=True)
+
+
+def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def load_item_map(item_map_path: Path) -> dict:
@@ -538,10 +603,7 @@ def list_keep_checklist_titles(
             continue
         if note.title:
             titles.append(note.title)
-    try:
-        atomic_write_json(cache_path, keep.dump(), indent=None)
-    except OSError:
-        pass
+    write_google_state_cache(cache_path, keep)
     return sorted(set(titles), key=str.casefold)
 
 
@@ -791,19 +853,13 @@ def sync_once(cfg: dict) -> SyncResult:
             note_map.pop(item_id, None)
 
     # keep.dump() walks the whole gkeepapi node graph (every note in the
-    # account, not just this one) -- it's the heaviest thing left in the
-    # pass and the prime suspect for a silent death here, so bracket it and
-    # free the dict promptly. Written compact, not pretty, to keep the
-    # transient memory down. Non-fatal: next login just won't reuse
+    # account) -- the heaviest thing left in the pass and a suspect for a
+    # silent death here. write_google_state_cache serialises it once,
+    # bounds it, and never raises. Non-fatal: next login just won't reuse
     # Google's sync cursor.
     log.info("serialising Google sync cache")
-    try:
-        state = keep.dump()
-        atomic_write_json(google_cache_path, state, indent=None)
-        del state
-        log.info("Google sync cache written")
-    except Exception:
-        log.warning("could not write Google sync cache", exc_info=True)
+    write_google_state_cache(google_cache_path, keep)
+    log.info("Google sync cache done")
 
     try:
         save_item_map(item_map_path, item_map)
