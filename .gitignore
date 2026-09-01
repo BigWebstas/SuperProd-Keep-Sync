@@ -4,6 +4,7 @@ keep-sync-daemon/__pycache__/
 *.pyc
 *.log
 *.fault.log
+keep-sync-daemon/_keep_sync_version.py
 
 # PyInstaller build output (see requirements-windows.txt / requirements-linux.txt)
 keep-sync-daemon/build/

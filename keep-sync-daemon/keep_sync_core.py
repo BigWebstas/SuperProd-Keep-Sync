@@ -46,6 +46,35 @@ _LOG_FORMAT = "%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s"
 _fault_log_handle = None  # kept open for the process lifetime; faulthandler writes here
 
 
+def get_version() -> str:
+    """Best-effort app version string for the status UI and the log banner.
+
+    A packaged build carries it in a generated `_keep_sync_version.py` (the build
+    workflow writes `__version__` there from `git describe` before running
+    PyInstaller). A plain source checkout derives it live from git. Neither
+    available -> "unknown"."""
+    try:
+        import _keep_sync_version  # generated at build time; gitignored
+        v = getattr(_keep_sync_version, "__version__", "").strip()
+        if v:
+            return v
+    except Exception:
+        pass
+    if not getattr(sys, "frozen", False):
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["git", "describe", "--tags", "--always", "--dirty"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                capture_output=True, text=True, timeout=5,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        except Exception:
+            pass
+    return "unknown"
+
+
 def _env_flag(name: str) -> bool:
     """True unless the env var is unset or an obvious "off" value."""
     return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no", "off")
@@ -94,12 +123,23 @@ def _enable_faulthandler(path: Path, logger: logging.Logger) -> None:
         )
         _fault_log_handle.flush()
         faulthandler.enable(file=_fault_log_handle, all_threads=True)
-        if hasattr(faulthandler, "register") and hasattr(signal, "SIGUSR1"):
-            faulthandler.register(
-                signal.SIGUSR1, file=_fault_log_handle, all_threads=True, chain=False
-            )
+        # Dump every thread's stack on a polite kill too (a session logout,
+        # `systemctl --user stop`, a `killall`). These fire at the C level,
+        # so unlike a Python signal handler they still run while Qt's C++
+        # event loop has the main thread. chain=True lets the default action
+        # (terminate) proceed afterwards. SIGKILL stays uncatchable.
+        if hasattr(faulthandler, "register"):
+            for signame in ("SIGTERM", "SIGHUP", "SIGUSR1"):
+                sig = getattr(signal, signame, None)
+                if sig is None:
+                    continue
+                faulthandler.register(
+                    sig, file=_fault_log_handle, all_threads=True,
+                    chain=(signame != "SIGUSR1"),
+                )
+        logger.info("faulthandler armed -> %s", path)
     except Exception:
-        logger.warning("could not enable faulthandler", exc_info=True)
+        logger.error("could not enable faulthandler -- native crashes will be invisible", exc_info=True)
 
 
 def setup_logging(log_path: Path, relaunch_on_crash: bool = False) -> logging.Logger:
@@ -196,8 +236,8 @@ def setup_logging(log_path: Path, relaunch_on_crash: bool = False) -> logging.Lo
     threading.excepthook = log_uncaught_thread
 
     logger.info(
-        "logging up: pid=%s python=%s platform=%s frozen=%s debug=%s log=%s",
-        os.getpid(), platform.python_version(), sys.platform,
+        "logging up: version=%s pid=%s python=%s platform=%s frozen=%s debug=%s log=%s",
+        get_version(), os.getpid(), platform.python_version(), sys.platform,
         getattr(sys, "frozen", False), debug, resolved,
     )
     if resolved != log_path:
@@ -372,12 +412,12 @@ def load_config(config_path: Path) -> dict:
     return cfg
 
 
-def atomic_write_json(path: Path, data: dict, mode: int = 0o600) -> None:
+def atomic_write_json(path: Path, data: dict, mode: int = 0o600, indent: "int | None" = 2) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
+            json.dump(data, fh, indent=indent)
         os.chmod(tmp_path, mode)
         os.replace(tmp_path, path)
     except Exception:
@@ -455,7 +495,7 @@ def load_item_map(item_map_path: Path) -> dict:
 
 
 def save_item_map(item_map_path: Path, item_map: dict) -> None:
-    atomic_write_json(item_map_path, item_map, mode=0o600)
+    atomic_write_json(item_map_path, item_map, mode=0o600, indent=None)
 
 
 def find_keep_list(keep: "gkeepapi.Keep", title: str, include_archived: bool):
@@ -498,7 +538,7 @@ def list_keep_checklist_titles(
         if note.title:
             titles.append(note.title)
     try:
-        atomic_write_json(cache_path, keep.dump())
+        atomic_write_json(cache_path, keep.dump(), indent=None)
     except OSError:
         pass
     return sorted(set(titles), key=str.casefold)
@@ -737,13 +777,24 @@ def sync_once(cfg: dict) -> SyncResult:
         for item_id in result.new_keep_item_ids:
             note_map.pop(item_id, None)
 
+    # keep.dump() walks the whole gkeepapi node graph (every note in the
+    # account, not just this one) -- it's the heaviest thing left in the
+    # pass and the prime suspect for a silent death here, so bracket it and
+    # free the dict promptly. Written compact, not pretty, to keep the
+    # transient memory down. Non-fatal: next login just won't reuse
+    # Google's sync cursor.
+    log.info("serialising Google sync cache")
     try:
-        atomic_write_json(google_cache_path, keep.dump())
-    except OSError:
-        pass  # non-fatal: next login just won't reuse Google's sync cursor
+        state = keep.dump()
+        atomic_write_json(google_cache_path, state, indent=None)
+        del state
+        log.info("Google sync cache written")
+    except Exception:
+        log.warning("could not write Google sync cache", exc_info=True)
 
     try:
         save_item_map(item_map_path, item_map)
+        log.info("item map written")
     except OSError as e:
         log.error("failed to write %s", item_map_path, exc_info=True)
         return SyncResult(False, f"failed to write {item_map_path}: {e}")
@@ -754,6 +805,7 @@ def sync_once(cfg: dict) -> SyncResult:
             f"SP tasks updated, but pushing item edits back to Keep failed: {push_error}",
         )
 
+    log.debug("writing last_sync.json debug dump")
     try:
         note = find_keep_list(keep, cfg.get("keep_note_title", ""), cfg.get("include_archived", False))
         atomic_write_json(

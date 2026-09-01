@@ -357,6 +357,11 @@ class StatusDialog(QDialog):
         reconfigure_btn.clicked.connect(self._reconfigure)
         layout.addWidget(reconfigure_btn, 2, 1)
 
+        version_label = QLabel(f"Version {core.get_version()}")
+        version_label.setStyleSheet("color: gray;")
+        version_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(version_label, 3, 0, 1, 2)
+
         app.status_changed.connect(self.status_label.setText)
 
     def _reconfigure(self) -> None:

@@ -286,5 +286,12 @@ class LogCallbackErrorsTests(unittest.TestCase):
                 f()
 
 
+class VersionTests(unittest.TestCase):
+    def test_returns_non_empty_string(self):
+        v = core.get_version()
+        self.assertIsInstance(v, str)
+        self.assertTrue(v)  # "unknown" at worst, never ""
+
+
 if __name__ == "__main__":
     unittest.main()

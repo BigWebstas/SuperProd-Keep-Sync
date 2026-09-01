@@ -348,6 +348,10 @@ class StatusWindow(tk.Tk):
             row=2, column=1, padx=10, pady=10, sticky="ew"
         )
 
+        tk.Label(self, text=f"Version {core.get_version()}", anchor="w", fg="gray").grid(
+            row=3, column=0, columnspan=2, sticky="w", **pad
+        )
+
         self._refresh_status()
 
     def _refresh_status(self) -> None:
