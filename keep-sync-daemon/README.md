@@ -74,10 +74,11 @@ pyinstaller --onefile --windowed --name KeepSyncTray keep_sync_tray.py
 
 First launch shows a setup window: Google email, OAuth Token (same manual step as
 above), SP Access Token → **Connect & load lists** → pick the Keep list and SP
-project → set an interval → optionally "start at login" (per-user, no admin) →
-**Save & Start Syncing**. The tray menu has Show status, Sync now, Open data
-folder, Reconfigure, and Quit. `config.json` and the autostart entry are written
-next to the binary, so keep it in a stable folder.
+project, optionally a tag to put on every task created from a Keep item → set an
+interval → optionally "start at login" (per-user, no admin) → **Save & Start
+Syncing**. The tray menu has Show status, Sync now, Open data folder, Reconfigure,
+and Quit. `config.json` and the autostart entry are written next to the binary,
+so keep it in a stable folder.
 
 ## Logs
 

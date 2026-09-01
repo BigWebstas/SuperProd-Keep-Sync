@@ -70,6 +70,7 @@ def default_config() -> dict:
         "sp_api_base_url": core.DEFAULT_SP_API_BASE_URL,
         "sp_access_token": "",
         "sp_project_id": "",
+        "sp_new_task_tag_id": "",
         "keep_note_title": "",
     }
 
@@ -145,6 +146,7 @@ class SetupDialog(QDialog):
         self.cfg = dict(cfg)
         self.result_cfg: dict | None = None
         self._project_ids: list[str] = []
+        self._tag_ids: list[str] = [""]  # index 0 is the "(no tag)" choice
 
         self.setWindowTitle(f"{APP_NAME} — Setup")
         self.setWindowIcon(make_icon())
@@ -202,6 +204,13 @@ class SetupDialog(QDialog):
         self.project_combo = QComboBox()
         self.project_combo.setEnabled(False)
         layout.addWidget(self.project_combo, row, 1)
+        row += 1
+
+        layout.addWidget(QLabel("Tag new tasks with:"), row, 0)
+        self.tag_combo = QComboBox()
+        self.tag_combo.addItem("(no tag)")
+        self.tag_combo.setEnabled(False)
+        layout.addWidget(self.tag_combo, row, 1)
         row += 1
 
         layout.addWidget(QLabel("Sync every (minutes):"), row, 0)
@@ -273,6 +282,18 @@ class SetupDialog(QDialog):
             self.connect_btn.setEnabled(True)
             return
 
+        try:
+            tags = core.list_sp_tags(sp_url, sp_token)
+        except Exception:
+            tags = []  # optional -- an old SP without GET /tags shouldn't block setup
+
+        self._tag_ids = [""] + [tid for tid, _ in tags]
+        self.tag_combo.clear()
+        self.tag_combo.addItems(["(no tag)"] + [title for _, title in tags])
+        self.tag_combo.setEnabled(True)
+        if self.cfg.get("sp_new_task_tag_id") in self._tag_ids:
+            self.tag_combo.setCurrentIndex(self._tag_ids.index(self.cfg["sp_new_task_tag_id"]))
+
         self.note_combo.clear()
         self.note_combo.addItems(titles or [])
         self.note_combo.setEnabled(bool(titles))
@@ -305,6 +326,9 @@ class SetupDialog(QDialog):
             self.status_label.setText("Pick a Keep list and a project first (use Connect).")
             return
 
+        tag_idx = self.tag_combo.currentIndex()
+        tag_id = self._tag_ids[tag_idx] if 0 <= tag_idx < len(self._tag_ids) else ""
+
         state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
         self.cfg.update(
             email=self.email_edit.text().strip(),
@@ -315,6 +339,7 @@ class SetupDialog(QDialog):
             sp_api_base_url=self.sp_url_edit.text().strip() or core.DEFAULT_SP_API_BASE_URL,
             sp_access_token=self.sp_token_edit.text().strip(),
             sp_project_id=self._project_ids[project_idx],
+            sp_new_task_tag_id=tag_id,
             keep_note_title=note_title,
         )
         core.save_config(CONFIG_PATH, self.cfg)

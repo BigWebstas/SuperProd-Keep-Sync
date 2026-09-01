@@ -64,6 +64,16 @@ class SPProject:
         )
 
 
+@dataclass
+class SPTag:
+    id: str
+    title: str
+
+    @classmethod
+    def from_json(cls, data: dict) -> "SPTag":
+        return cls(id=data.get("id", ""), title=data.get("title", ""))
+
+
 class SPClient:
     """Thin wrapper over the handful of Local REST API endpoints this sync
     needs. Never returns partial data: any non-2xx or transport error is
@@ -150,6 +160,10 @@ class SPClient:
         data = self._request("GET", "/projects")
         return [SPProject.from_json(p) for p in self._rows(data, "projects")]
 
+    def list_tags(self) -> list[SPTag]:
+        data = self._request("GET", "/tags")
+        return [SPTag.from_json(t) for t in self._rows(data, "tags") if t.get("id")]
+
     def list_tasks(self, project_id: str, include_done: bool = True, source: str = "active") -> list[SPTask]:
         params = {"projectId": project_id, "source": source}
         if include_done:
@@ -157,8 +171,13 @@ class SPClient:
         data = self._request("GET", "/tasks", params=params)
         return [SPTask.from_json(t) for t in self._rows(data, "tasks")]
 
-    def add_task(self, title: str, project_id: str, is_done: bool = False) -> str:
+    def add_task(
+        self, title: str, project_id: str, is_done: bool = False,
+        tag_ids: "list[str] | None" = None,
+    ) -> str:
         payload = {"title": title, "projectId": project_id, "isDone": bool(is_done)}
+        if tag_ids:
+            payload["tagIds"] = list(tag_ids)
         data = self._request("POST", "/tasks", json=payload)
         if isinstance(data, str):
             return data

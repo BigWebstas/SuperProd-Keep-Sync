@@ -35,6 +35,7 @@ be running for a pass to change anything on the SP side.
 |---|---|
 | Checked / renamed items | Flow in whichever direction the change happened |
 | New items | Keep item → SP task; new top-level SP task → Keep item |
+| Tagging new tasks | Optional: pick one SP tag in setup and every task created from a Keep item gets it (SP only allows this at creation) |
 | Deletes | Never propagate — deliberately, so a background loop is never destructive |
 | Nested sub-items / subtasks | Not mapped; SP subtasks are skipped SP → Keep |
 | Conflict (both sides changed) | Keep wins |
