@@ -408,6 +408,7 @@ def load_config(config_path: Path) -> dict:
     cfg.setdefault("sp_api_base_url", DEFAULT_SP_API_BASE_URL)
     cfg.setdefault("sp_access_token", "")
     cfg.setdefault("sp_project_id", "")
+    cfg.setdefault("sp_new_task_tag_id", "")
     cfg.setdefault("keep_note_title", "")
     return cfg
 
@@ -551,6 +552,13 @@ def list_sp_projects(base_url: str, token: str) -> list[tuple[str, str]]:
     return [(p.id, p.title) for p in sp.list_projects() if not p.is_archived]
 
 
+def list_sp_tags(base_url: str, token: str) -> list[tuple[str, str]]:
+    """(id, title) for every SP tag -- used by the tray setup dialogs to
+    populate the optional "tag new tasks with" dropdown."""
+    sp = sp_client.SPClient(base_url or DEFAULT_SP_API_BASE_URL, token)
+    return [(t.id, t.title) for t in sp.list_tags()]
+
+
 @dataclass
 class ReconcileResult:
     created_sp: int = 0
@@ -586,6 +594,11 @@ def reconcile_sp(cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", ite
     log = logging.getLogger(LOGGER_NAME)
     note_title = cfg.get("keep_note_title") or ""
     project_id = cfg.get("sp_project_id") or ""
+    # Optional: stamp every task this sync creates from a Keep item with one
+    # SP tag (chosen in the setup dialog). SP's REST API only takes tagIds
+    # at creation, so this never touches tasks that already exist.
+    new_task_tag_id = (cfg.get("sp_new_task_tag_id") or "").strip()
+    new_task_tag_ids = [new_task_tag_id] if new_task_tag_id else None
 
     note = find_keep_list(keep, note_title, cfg.get("include_archived", False))
     if note is None:
@@ -634,7 +647,7 @@ def reconcile_sp(cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", ite
             entry["text"] = item.text
             entry["checked"] = bool(item.checked)
         else:
-            task_id = sp.add_task(item.text, project_id, bool(item.checked))
+            task_id = sp.add_task(item.text, project_id, bool(item.checked), tag_ids=new_task_tag_ids)
             note_map[item.id] = {"taskId": task_id, "text": item.text, "checked": bool(item.checked)}
             res.created_sp += 1
 

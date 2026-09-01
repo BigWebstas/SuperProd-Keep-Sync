@@ -6,5 +6,6 @@
   "sp_api_base_url": "http://127.0.0.1:3876",
   "sp_access_token": "paste from SP Settings -> Misc -> Access Token",
   "sp_project_id": "the target SP project id (GET /projects lists them)",
+  "sp_new_task_tag_id": "optional: SP tag id to put on tasks created from Keep items (GET /tags); \"\" for none",
   "keep_note_title": "the exact title of the Keep checklist to sync"
 }

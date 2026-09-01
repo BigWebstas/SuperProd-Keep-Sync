@@ -39,11 +39,11 @@ class FakeSP:
     def list_tasks(self, project_id, include_done=True, source="active"):
         return [t for t in self.tasks.values() if t.project_id == project_id]
 
-    def add_task(self, title, project_id, is_done=False):
+    def add_task(self, title, project_id, is_done=False, tag_ids=None):
         tid = f"sp{self._next}"
         self._next += 1
         self.tasks[tid] = sp_client.SPTask(tid, title, bool(is_done), None, project_id)
-        self.calls.append(("add", tid, title, is_done))
+        self.calls.append(("add", tid, title, is_done, tag_ids))
         return tid
 
     def update_task(self, task_id, patch):
@@ -284,6 +284,50 @@ class LogCallbackErrorsTests(unittest.TestCase):
         with self.assertLogs(core.LOGGER_NAME, level="ERROR"):
             with self.assertRaises(ValueError):
                 f()
+
+
+class NewTaskTagTests(unittest.TestCase):
+    """cfg['sp_new_task_tag_id'] -> tasks created from Keep items get that tag."""
+
+    def _add_call(self, sp):
+        return next(c for c in sp.calls if c[0] == "add")
+
+    def test_no_tag_configured_passes_none(self):
+        note, _ = make_list(items=[("buy milk", False)])
+        sp = FakeSP()
+        core.reconcile_sp(cfg(), FakeKeep([note]), sp, {})
+        self.assertIsNone(self._add_call(sp)[4])
+
+    def test_configured_tag_is_applied_to_new_tasks(self):
+        note, _ = make_list(items=[("buy milk", False)])
+        sp = FakeSP()
+        c = cfg()
+        c["sp_new_task_tag_id"] = "tag-work"
+        core.reconcile_sp(c, FakeKeep([note]), sp, {})
+        self.assertEqual(self._add_call(sp)[4], ["tag-work"])
+
+    def test_blank_tag_id_is_treated_as_none(self):
+        note, _ = make_list(items=[("buy milk", False)])
+        sp = FakeSP()
+        c = cfg()
+        c["sp_new_task_tag_id"] = "   "
+        core.reconcile_sp(c, FakeKeep([note]), sp, {})
+        self.assertIsNone(self._add_call(sp)[4])
+
+
+class SPClientAddTaskTests(unittest.TestCase):
+    def test_add_task_puts_tag_ids_in_payload(self):
+        seen = {}
+
+        client = sp_client.SPClient("http://x", "tok")
+        client._request = lambda method, path, **kw: (seen.update(kw), "new-id")[1]
+
+        client.add_task("t", "proj", False, tag_ids=["a", "b"])
+        self.assertEqual(seen["json"]["tagIds"], ["a", "b"])
+
+        seen.clear()
+        client.add_task("t", "proj", False)
+        self.assertNotIn("tagIds", seen["json"])
 
 
 class VersionTests(unittest.TestCase):

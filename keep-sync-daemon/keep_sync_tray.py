@@ -57,6 +57,7 @@ def default_config() -> dict:
         "sp_api_base_url": core.DEFAULT_SP_API_BASE_URL,
         "sp_access_token": "",
         "sp_project_id": "",
+        "sp_new_task_tag_id": "",
         "keep_note_title": "",
     }
 
@@ -124,6 +125,7 @@ class SetupWindow(tk.Tk):
         self.cfg = dict(cfg)
         self.result: dict | None = None
         self._project_ids: list[str] = []
+        self._tag_ids: list[str] = [""]  # index 0 is the "(no tag)" choice
 
         self.title(f"{APP_NAME} — Setup")
         self.resizable(False, False)
@@ -171,23 +173,28 @@ class SetupWindow(tk.Tk):
         self.project_combo = ttk.Combobox(self, textvariable=self.project_var, width=34, state="disabled")
         self.project_combo.grid(row=7, column=1, **pad)
 
-        tk.Label(self, text="Sync every (minutes):").grid(row=8, column=0, sticky="e", **pad)
+        tk.Label(self, text="Tag new tasks with:").grid(row=8, column=0, sticky="e", **pad)
+        self.tag_var = tk.StringVar()
+        self.tag_combo = ttk.Combobox(self, textvariable=self.tag_var, width=34, state="disabled")
+        self.tag_combo.grid(row=8, column=1, **pad)
+
+        tk.Label(self, text="Sync every (minutes):").grid(row=9, column=0, sticky="e", **pad)
         self.interval_var = tk.StringVar(
             value=str(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES))
         )
-        tk.Entry(self, textvariable=self.interval_var, width=8).grid(row=8, column=1, sticky="w", **pad)
+        tk.Entry(self, textvariable=self.interval_var, width=8).grid(row=9, column=1, sticky="w", **pad)
 
         self.startup_var = tk.BooleanVar(value=self.cfg.get("run_at_startup", False))
         tk.Checkbutton(
             self, text="Start automatically when Windows starts", variable=self.startup_var
-        ).grid(row=9, column=0, columnspan=2, sticky="w", **pad)
+        ).grid(row=10, column=0, columnspan=2, sticky="w", **pad)
 
         self.status_var = tk.StringVar(value="")
         self.status_label = tk.Label(self, textvariable=self.status_var, fg="red", wraplength=380, justify="left")
-        self.status_label.grid(row=10, column=0, columnspan=2, **pad)
+        self.status_label.grid(row=11, column=0, columnspan=2, **pad)
 
         self.submit_btn = tk.Button(self, text="Save & Start Syncing", command=self._submit, state="disabled")
-        self.submit_btn.grid(row=11, column=0, columnspan=2, pady=10)
+        self.submit_btn.grid(row=12, column=0, columnspan=2, pady=10)
 
     def _cancel(self) -> None:
         self.result = None
@@ -254,6 +261,18 @@ class SetupWindow(tk.Tk):
         elif project_titles:
             self.project_var.set(project_titles[0])
 
+        try:
+            tags = core.list_sp_tags(sp_url, sp_token)
+        except Exception:
+            tags = []  # optional -- an old SP without GET /tags shouldn't block setup
+        self._tag_ids = [""] + [tid for tid, _ in tags]
+        tag_titles = ["(no tag)"] + [title for _, title in tags]
+        self.tag_combo.config(values=tag_titles, state="readonly")
+        if self.cfg.get("sp_new_task_tag_id") in self._tag_ids:
+            self.tag_var.set(tag_titles[self._tag_ids.index(self.cfg["sp_new_task_tag_id"])])
+        else:
+            self.tag_var.set(tag_titles[0])
+
         self.connect_btn.config(state="normal")
         if not titles:
             self.status_var.set("Connected, but no Keep checklists were found.")
@@ -288,6 +307,14 @@ class SetupWindow(tk.Tk):
             self.status_var.set("Pick a Keep list and a project first (use Connect).")
             return
 
+        tag_titles = list(self.tag_combo.cget("values"))
+        tag_title = self.tag_var.get().strip()
+        tag_id = (
+            self._tag_ids[tag_titles.index(tag_title)]
+            if tag_title in tag_titles and len(self._tag_ids) == len(tag_titles)
+            else ""
+        )
+
         state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
         self.cfg.update(
             email=self.email_var.get().strip(),
@@ -298,6 +325,7 @@ class SetupWindow(tk.Tk):
             sp_api_base_url=self.sp_url_var.get().strip() or core.DEFAULT_SP_API_BASE_URL,
             sp_access_token=self.sp_token_var.get().strip(),
             sp_project_id=project_id,
+            sp_new_task_tag_id=tag_id,
             keep_note_title=note_title,
         )
         core.save_config(CONFIG_PATH, self.cfg)
