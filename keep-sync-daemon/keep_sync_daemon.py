@@ -42,6 +42,11 @@ def main() -> int:
         print(f"[keep-sync-daemon] config error: {e}", file=sys.stderr)
         return 2
 
+    # Rotating file log next to the other state files, plus a native-crash
+    # dump (.fault.log). Set KEEP_SYNC_DEBUG=1 for DEBUG detail. stdout/
+    # stderr still carry the one-line result for cron redirects.
+    core.setup_logging(core.resolve_state_dir(cfg["state_dir"]) / "keep_sync_daemon.log")
+
     result = core.sync_once(cfg)
     if result.ok:
         print(f"[keep-sync-daemon] {result.message}")
