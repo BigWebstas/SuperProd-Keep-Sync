@@ -33,6 +33,20 @@ jobs:
           --hidden-import _keep_sync_version
           keep_sync_tray.py
 
+      # Diagnostic: a "STATUS_BREAKPOINT" (0x80000003) crash in _json in the
+      # frozen build classically means a debug-built binary got bundled.
+      # A throwaway --onedir build lets us look.
+      - name: Inspect the bundle for debug binaries
+        continue-on-error: true
+        run: |
+          python -c "import sys,_json,_ssl; print('python', sys.version); print('_json', _json.__file__); print('_ssl', _ssl.__file__)"
+          pyinstaller --onedir --windowed --name _inspect --hidden-import _keep_sync_version keep_sync_tray.py 2>&1 | Out-Null
+          $sus = Get-ChildItem -Recurse dist\_inspect -Include *_d.pyd,*_d.dll,python*_d.dll,ucrtbased.dll,vcruntime*d.dll,msvcp*d.dll -ErrorAction SilentlyContinue
+          if ($sus) { Write-Host "SUSPECT DEBUG BINARIES:"; $sus | ForEach-Object { $_.FullName } }
+          else { Write-Host "no obviously-debug binaries in the bundle" }
+          Get-ChildItem dist\_inspect\_internal -Filter *.pyd | Select-Object Name,Length | Format-Table -AutoSize
+          Remove-Item -Recurse -Force dist\_inspect,build\_inspect -ErrorAction SilentlyContinue
+
       - name: Self-test the built exe
         timeout-minutes: 3
         env:
