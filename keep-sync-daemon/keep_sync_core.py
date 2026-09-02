@@ -166,8 +166,8 @@ def setup_logging(log_path: Path, relaunch_on_crash: bool = False) -> logging.Lo
     file (and the sibling .fault.log) is the only place any error is
     visible.
 
-    Writes to `log_path` (10MB x 3 rotating, 40MB ceiling) if its directory
-    is writable, else falls back to <DEFAULT_STATE_DIR> then the temp dir;
+    Writes to `log_path` (rotated daily at midnight, 7 days kept) if its
+    directory is writable, else falls back to <DEFAULT_STATE_DIR> then the temp dir;
     the resolved path is `logger.log_path`. Also adds a stderr handler (for
     terminal runs), arms faulthandler for native crashes, and installs
     sys.excepthook / threading.excepthook so uncaught Python exceptions are
@@ -209,8 +209,12 @@ def setup_logging(log_path: Path, relaunch_on_crash: bool = False) -> logging.Lo
     fmt = logging.Formatter(_LOG_FORMAT)
 
     try:
-        file_handler = logging.handlers.RotatingFileHandler(
-            resolved, maxBytes=10_000_000, backupCount=3, encoding="utf-8"
+        # Daily rollover at midnight, seven days kept. On a short-lived cron
+        # run the handler computes its next rollover from the file's mtime,
+        # so a pass that starts after midnight still rotates on the first
+        # write even though the process never spans the boundary itself.
+        file_handler = logging.handlers.TimedRotatingFileHandler(
+            resolved, when="midnight", backupCount=7, encoding="utf-8"
         )
         file_handler.setFormatter(fmt)
         logger.addHandler(file_handler)
