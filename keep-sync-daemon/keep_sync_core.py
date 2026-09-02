@@ -608,14 +608,15 @@ def list_keep_checklist_titles(
     email: str, master_token: str, state_dir: Path, include_archived: bool = False
 ) -> list[str]:
     """One Keep pull, returning the titles of every checklist note -- used
-    by the tray setup dialogs to populate the "Keep list" dropdown."""
+    by the tray setup dialogs to populate the "Keep list" dropdown.
+
+    Deliberately does NOT touch google_sync_cache.json: this is a one-shot
+    interactive call (the user is watching the dialog), a login challenge
+    here is harmless, and parsing/writing that big cache blob on the GUI
+    thread is exactly what has been crashing "Connect & load lists". Only
+    the background sync loop bothers with the cache."""
     keep = gkeepapi.Keep()
-    cache_path = state_dir / "google_sync_cache.json"
-    cached = load_google_state_cache(cache_path)
-    if cached:
-        keep.authenticate(email, master_token, state=cached)
-    else:
-        keep.authenticate(email, master_token)
+    keep.authenticate(email, master_token)
     keep.sync()
     titles = []
     for note in keep.all():
@@ -627,7 +628,6 @@ def list_keep_checklist_titles(
             continue
         if note.title:
             titles.append(note.title)
-    write_google_state_cache(cache_path, keep)
     return sorted(set(titles), key=str.casefold)
 
 
