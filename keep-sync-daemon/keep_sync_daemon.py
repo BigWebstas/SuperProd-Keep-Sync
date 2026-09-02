@@ -20,6 +20,7 @@ error or SP being closed never corrupts either side.
 """
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -56,4 +57,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if os.environ.get(core.KEEP_WORKER_ENV) == "1":
+        raise SystemExit(core.run_keep_worker())
     raise SystemExit(main())

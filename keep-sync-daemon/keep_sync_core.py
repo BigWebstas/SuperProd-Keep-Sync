@@ -44,6 +44,9 @@ import sp_client
 LOGGER_NAME = "keep_sync"
 
 DEBUG_ENV = "KEEP_SYNC_DEBUG"
+KEEP_WORKER_ENV = "KEEP_SYNC_WORKER"
+KEEP_WORKER_REQUEST_ENV = "KEEP_SYNC_WORKER_REQUEST"
+KEEP_WORKER_OUT_ENV = "KEEP_SYNC_WORKER_OUT"
 _LOG_FORMAT = "%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s"
 _fault_log_handle = None  # kept open for the process lifetime; faulthandler writes here
 
@@ -115,13 +118,26 @@ def _enable_faulthandler(path: Path, logger: logging.Logger) -> None:
 
     Best-effort: anything going wrong here (a PyInstaller --windowed build
     with no usable stderr, a locked file) must not take the app down, so
-    every failure is swallowed after a warning."""
+    every failure is swallowed after a warning.
+
+    On Windows faulthandler.enable() installs a *vectored* (first-chance)
+    exception handler, so it writes "Windows fatal exception" dumps for
+    exceptions that pystray/ctypes catch and handle a frame later
+    (RPC_E_DISCONNECTED, a benign breakpoint) -- pure noise that reads as a
+    fatal crash. So there we skip enable() and rely on sys.excepthook /
+    threading.excepthook / the __main__ handler for Python-level crashes.
+    On POSIX its SIGSEGV/SIGABRT handler is genuinely useful, so keep it."""
     global _fault_log_handle
+    if os.name == "nt":
+        logger.info("faulthandler exception handler left off on Windows (first-chance noise)")
+        return
     try:
-        _fault_log_handle = open(path, "a", encoding="utf-8")
+        # Truncate: the file is per-launch, and an append-only history just
+        # confuses "paste the fault log" (stale runs on top).
+        _fault_log_handle = open(path, "w", encoding="utf-8")
         _fault_log_handle.write(
-            f"\n=== faulthandler armed {datetime.now(timezone.utc).isoformat()} "
-            f"pid={os.getpid()} ===\n"
+            f"=== faulthandler armed {datetime.now(timezone.utc).isoformat()} "
+            f"pid={os.getpid()} version={get_version()} ===\n"
         )
         _fault_log_handle.flush()
         faulthandler.enable(file=_fault_log_handle, all_threads=True)
@@ -203,16 +219,16 @@ def setup_logging(log_path: Path, relaunch_on_crash: bool = False) -> logging.Lo
 
     # Only when there's a real stream to write to — a --windowed frozen
     # build has sys.stderr = None, and StreamHandler(None) just raises on
-    # every emit.
-    if sys.stderr is not None:
+    # every emit. The Keep worker keeps stdout/stderr clean for its parent.
+    if sys.stderr is not None and not _env_flag(KEEP_WORKER_ENV):
         stream_handler = logging.StreamHandler()
         stream_handler.setFormatter(fmt)
         logger.addHandler(stream_handler)
 
-    # The self-test build must never fork-bomb itself: a crash there would
-    # relaunch -> crash -> relaunch and hang CI on the modal PyInstaller
-    # error dialog.
-    if _env_flag("KEEP_SYNC_TRAY_SELFTEST"):
+    # Neither the self-test build nor the Keep worker may relaunch on a
+    # crash: the self-test would fork-bomb into the modal PyInstaller error
+    # dialog, and the worker must let its crash surface as an exit code.
+    if _env_flag("KEEP_SYNC_TRAY_SELFTEST") or _env_flag(KEEP_WORKER_ENV):
         relaunch_on_crash = False
 
     try:
@@ -639,6 +655,104 @@ def list_keep_checklist_titles(
             if note.title:
                 titles.append(note.title)
     return sorted(set(titles), key=str.casefold)
+
+
+def list_keep_checklist_titles_isolated(
+    email: str, master_token: str, state_dir: Path, include_archived: bool = False,
+    timeout: float = 120.0,
+) -> list[str]:
+    """Same result as list_keep_checklist_titles(), but the Keep pull runs
+    in a short-lived child process. gkeepapi parsing Google's response has
+    hard-crashed the frozen Windows build (0x80000003 in _json); isolating
+    it means that crash becomes a non-zero exit code we can report in the
+    setup dialog instead of taking the whole tray/setup window down.
+
+    The child is this same executable/script re-invoked with
+    KEEP_SYNC_WORKER=1; the request (which carries the master token) is
+    passed as a base64 env var, not argv (argv shows in process listings).
+    The reply comes back through a temp file, not stdout -- a --windowed
+    exe's sys.stdout can be None."""
+    import base64
+    import subprocess
+    import tempfile
+
+    if getattr(sys, "frozen", False):
+        argv = [sys.executable]
+    else:
+        argv = [sys.executable, os.path.abspath(sys.argv[0])]
+    request = json.dumps({
+        "op": "titles",
+        "email": email,
+        "master_token": master_token,
+        "state_dir": str(state_dir),
+        "include_archived": bool(include_archived),
+    })
+    fd, out_path = tempfile.mkstemp(prefix="keepworker-", suffix=".json")
+    os.close(fd)
+    env = {
+        **os.environ,
+        KEEP_WORKER_ENV: "1",
+        KEEP_WORKER_REQUEST_ENV: base64.b64encode(request.encode("utf-8")).decode("ascii"),
+        KEEP_WORKER_OUT_ENV: out_path,
+    }
+    try:
+        try:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=timeout, env=env,
+                stdin=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("the Keep helper timed out")
+        except OSError as e:
+            raise RuntimeError(f"could not start the Keep helper: {e}")
+
+        try:
+            resp = json.loads(Path(out_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            resp = None
+
+        if resp is None:
+            tail = ((proc.stderr or "").strip().splitlines() or [""])[-1]
+            raise RuntimeError(
+                f"the Keep helper crashed (exit {proc.returncode}"
+                + (f", {tail}" if tail else "") + ")"
+            )
+        if not resp.get("ok"):
+            raise RuntimeError(resp.get("error") or "Keep helper failed")
+        return list(resp.get("titles") or [])
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
+def run_keep_worker() -> int:
+    """Child-process entry (KEEP_SYNC_WORKER=1). Reads the base64 JSON
+    request from KEEP_SYNC_WORKER_REQUEST, does the Keep operation, writes
+    the JSON reply to the file named by KEEP_SYNC_WORKER_OUT. A hard crash
+    here leaves that file absent -- the parent treats that as a crash."""
+    import base64
+
+    out_path = os.environ.get(KEEP_WORKER_OUT_ENV, "")
+    try:
+        raw = base64.b64decode(os.environ.get(KEEP_WORKER_REQUEST_ENV, "") or "")
+        req = json.loads(raw or b"{}")
+        if req.get("op") == "titles":
+            titles = list_keep_checklist_titles(
+                req["email"], req["master_token"],
+                Path(req["state_dir"]), req.get("include_archived", False),
+            )
+            reply = {"ok": True, "titles": titles}
+        else:
+            reply = {"ok": False, "error": f"unknown op {req.get('op')!r}"}
+    except BaseException as e:
+        reply = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    try:
+        Path(out_path).write_text(json.dumps(reply), encoding="utf-8")
+    except OSError:
+        return 1
+    return 0 if reply.get("ok") else 1
 
 
 def list_sp_projects(base_url: str, token: str) -> list[tuple[str, str]]:
