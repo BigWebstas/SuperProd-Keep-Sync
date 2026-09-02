@@ -480,12 +480,16 @@ NO_GOOGLE_CACHE_ENV = "KEEP_SYNC_NO_GOOGLE_CACHE"
 
 
 @contextlib.contextmanager
-def _gc_paused():
-    """Hold the cyclic GC off for a block. A GC pass firing inside the _json
-    C decoder while it parses the multi-thousand-node account graph has
-    crashed the frozen Windows build with a breakpoint fault (0x80000003
-    "Garbage-collecting" mid raw_decode). Pausing GC for the parse/serialise
-    removes that window."""
+def _gc_paused(collect_after: bool = False):
+    """Hold the cyclic GC off for a block.
+
+    The frozen Windows build hard-crashes (0x80000003 breakpoint, reported
+    as "Garbage-collecting" inside json's C raw_decode) whenever a GC pass
+    fires while `_json` is parsing a large payload -- gkeepapi's sync
+    response, the sync-cursor cache, any big JSON. Pausing GC around those
+    operations removes the window; refcounting still frees everything
+    except genuine reference cycles, which `collect_after` mops up once the
+    block is done."""
     was_enabled = gc.isenabled()
     gc.disable()
     try:
@@ -493,6 +497,11 @@ def _gc_paused():
     finally:
         if was_enabled:
             gc.enable()
+            if collect_after:
+                try:
+                    gc.collect()
+                except Exception:
+                    pass
 
 
 def load_google_state_cache(cache_path: Path):
@@ -616,18 +625,19 @@ def list_keep_checklist_titles(
     thread is exactly what has been crashing "Connect & load lists". Only
     the background sync loop bothers with the cache."""
     keep = gkeepapi.Keep()
-    keep.authenticate(email, master_token)
-    keep.sync()
     titles = []
-    for note in keep.all():
-        if not isinstance(note, gkeepapi.node.List):
-            continue
-        if note.trashed:
-            continue
-        if note.archived and not include_archived:
-            continue
-        if note.title:
-            titles.append(note.title)
+    with _gc_paused(collect_after=True):
+        keep.authenticate(email, master_token)
+        keep.sync()
+        for note in keep.all():
+            if not isinstance(note, gkeepapi.node.List):
+                continue
+            if note.trashed:
+                continue
+            if note.archived and not include_archived:
+                continue
+            if note.title:
+                titles.append(note.title)
     return sorted(set(titles), key=str.casefold)
 
 
@@ -793,7 +803,17 @@ class SyncResult:
 def sync_once(cfg: dict) -> SyncResult:
     """Runs one Keep <-> Super Productivity reconcile pass. Never raises:
     on any failure both sides are left untouched, so a transient Keep
-    login error or SP being closed never corrupts either side."""
+    login error or SP being closed never corrupts either side.
+
+    The whole pass runs with the cyclic GC paused (see _gc_paused): a GC
+    sweep landing inside `_json` while it parses Google's or SP's response
+    hard-crashes the frozen Windows build. GC is re-enabled and run once
+    when the pass finishes."""
+    with _gc_paused(collect_after=True):
+        return _sync_once(cfg)
+
+
+def _sync_once(cfg: dict) -> SyncResult:
     log = logging.getLogger(LOGGER_NAME)
     log.info("sync starting for %s", cfg.get("email"))
 
