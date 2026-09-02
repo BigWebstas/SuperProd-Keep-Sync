@@ -429,7 +429,7 @@ class TrayApp:
     def _run_sync(self) -> None:
         start = time.monotonic()
         log.info("sync run starting")
-        result = core.sync_once(self.cfg)
+        result = core.sync_once_isolated(self.cfg)
         elapsed = time.monotonic() - start
         ts = time.strftime("%H:%M:%S")
         self._set_status(f"{'OK' if result.ok else 'error'} @ {ts}: {result.message}")

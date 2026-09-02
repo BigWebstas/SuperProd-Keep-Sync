@@ -453,7 +453,7 @@ class KeepWorkerTests(unittest.TestCase):
         self.assertIn("crashed", str(cm.exception))
 
     def test_isolated_returns_titles_from_reply_file(self):
-        import json, os
+        import json
 
         def fake_run(argv, **kw):
             out = kw["env"][core.KEEP_WORKER_OUT_ENV]
@@ -469,6 +469,32 @@ class KeepWorkerTests(unittest.TestCase):
             self.assertEqual(
                 core.list_keep_checklist_titles_isolated("e", "t", core.Path("/x")), ["x"]
             )
+
+    def test_sync_once_isolated_is_plain_sync_off_windows(self):
+        sentinel = core.SyncResult(True, "done", 3)
+        with unittest.mock.patch.object(core.os, "name", "posix"):
+            with unittest.mock.patch.object(core, "sync_once", return_value=sentinel) as m:
+                self.assertIs(core.sync_once_isolated({"x": 1}), sentinel)
+                m.assert_called_once_with({"x": 1})
+
+    def test_sync_once_isolated_reconstructs_result_on_windows(self):
+        with unittest.mock.patch.object(core.os, "name", "nt"):
+            with unittest.mock.patch.object(
+                core, "_spawn_keep_worker",
+                return_value={"ok": True, "result": {"ok": False, "message": "SP closed", "count": 0}},
+            ):
+                r = core.sync_once_isolated({"x": 1})
+        self.assertFalse(r.ok)
+        self.assertEqual(r.message, "SP closed")
+
+    def test_sync_once_isolated_worker_crash_is_a_failed_result(self):
+        with unittest.mock.patch.object(core.os, "name", "nt"):
+            with unittest.mock.patch.object(
+                core, "_spawn_keep_worker", side_effect=RuntimeError("the Keep helper crashed (exit 1)"),
+            ):
+                r = core.sync_once_isolated({"x": 1})
+        self.assertFalse(r.ok)
+        self.assertIn("crashed", r.message)
 
 
 class VersionTests(unittest.TestCase):

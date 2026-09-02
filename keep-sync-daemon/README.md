@@ -107,9 +107,10 @@ crash.
 - The Qt tray also routes Qt's own warnings (`Qt: ...` lines) into the log, and
   crashes inside a tray menu action are logged with a traceback instead of
   taking the tray down silently.
-- "Connect & load lists" runs the Keep pull in a short-lived child process, so if
-  the frozen build hard-crashes parsing Google's response the setup window just
-  shows an error instead of dying.
+- On Windows the tray runs each Keep pull (setup's "Connect & load lists" and
+  every background sync) in a short-lived child process, so if the frozen build
+  hard-crashes parsing Google's response it just fails that one pass — the tray
+  stays up and retries. Off Windows the sync runs in-process as before.
 
 ## Scheduling the CLI daemon
 

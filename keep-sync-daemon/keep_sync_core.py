@@ -657,21 +657,16 @@ def list_keep_checklist_titles(
     return sorted(set(titles), key=str.casefold)
 
 
-def list_keep_checklist_titles_isolated(
-    email: str, master_token: str, state_dir: Path, include_archived: bool = False,
-    timeout: float = 120.0,
-) -> list[str]:
-    """Same result as list_keep_checklist_titles(), but the Keep pull runs
-    in a short-lived child process. gkeepapi parsing Google's response has
-    hard-crashed the frozen Windows build (0x80000003 in _json); isolating
-    it means that crash becomes a non-zero exit code we can report in the
-    setup dialog instead of taking the whole tray/setup window down.
+def _spawn_keep_worker(request: dict, timeout: float) -> dict:
+    """Re-invoke this same exe/script with KEEP_SYNC_WORKER=1 to do one
+    Keep operation in a throwaway process, so a native crash (the frozen
+    Windows build hard-faults in _json parsing Google's response) becomes a
+    reportable error instead of taking the app down.
 
-    The child is this same executable/script re-invoked with
-    KEEP_SYNC_WORKER=1; the request (which carries the master token) is
-    passed as a base64 env var, not argv (argv shows in process listings).
-    The reply comes back through a temp file, not stdout -- a --windowed
-    exe's sys.stdout can be None."""
+    Request (carries secrets) goes via a base64 env var, not argv. Reply
+    comes back through a temp file, not stdout -- a --windowed exe's
+    sys.stdout can be None. Raises RuntimeError on crash / timeout / a
+    worker-reported error."""
     import base64
     import subprocess
     import tempfile
@@ -680,19 +675,14 @@ def list_keep_checklist_titles_isolated(
         argv = [sys.executable]
     else:
         argv = [sys.executable, os.path.abspath(sys.argv[0])]
-    request = json.dumps({
-        "op": "titles",
-        "email": email,
-        "master_token": master_token,
-        "state_dir": str(state_dir),
-        "include_archived": bool(include_archived),
-    })
     fd, out_path = tempfile.mkstemp(prefix="keepworker-", suffix=".json")
     os.close(fd)
     env = {
         **os.environ,
         KEEP_WORKER_ENV: "1",
-        KEEP_WORKER_REQUEST_ENV: base64.b64encode(request.encode("utf-8")).decode("ascii"),
+        KEEP_WORKER_REQUEST_ENV: base64.b64encode(
+            json.dumps(request).encode("utf-8")
+        ).decode("ascii"),
         KEEP_WORKER_OUT_ENV: out_path,
     }
     try:
@@ -712,19 +702,60 @@ def list_keep_checklist_titles_isolated(
             resp = None
 
         if resp is None:
-            tail = ((proc.stderr or "").strip().splitlines() or [""])[-1]
+            stderr = (proc.stderr or "").strip()
+            if stderr:
+                logging.getLogger(LOGGER_NAME).error(
+                    "Keep helper (exit %s) stderr:\n%s", proc.returncode, stderr
+                )
+            tail = (stderr.splitlines() or [""])[-1]
             raise RuntimeError(
                 f"the Keep helper crashed (exit {proc.returncode}"
                 + (f", {tail}" if tail else "") + ")"
             )
         if not resp.get("ok"):
             raise RuntimeError(resp.get("error") or "Keep helper failed")
-        return list(resp.get("titles") or [])
+        return resp
     finally:
         try:
             os.unlink(out_path)
         except OSError:
             pass
+
+
+def list_keep_checklist_titles_isolated(
+    email: str, master_token: str, state_dir: Path, include_archived: bool = False,
+    timeout: float = 120.0,
+) -> list[str]:
+    """list_keep_checklist_titles() run in a child process (see
+    _spawn_keep_worker). A crash surfaces as RuntimeError for the setup
+    dialog instead of killing it."""
+    resp = _spawn_keep_worker({
+        "op": "titles",
+        "email": email,
+        "master_token": master_token,
+        "state_dir": str(state_dir),
+        "include_archived": bool(include_archived),
+    }, timeout)
+    return list(resp.get("titles") or [])
+
+
+def sync_once_isolated(cfg: dict, timeout: float = 300.0) -> SyncResult:
+    """sync_once() for the tray apps: on Windows it runs the pass in a
+    child process so the frozen build's _json crash can't take the tray
+    down -- a crash just fails this pass, the scheduler retries next
+    interval. Elsewhere it's a plain sync_once() (that crash is
+    Windows-frozen-only, and re-spawning a 25-90MB binary every few
+    minutes isn't worth it). Never raises, like sync_once()."""
+    if os.name != "nt":
+        return sync_once(cfg)
+    try:
+        resp = _spawn_keep_worker({"op": "sync", "cfg": cfg}, timeout)
+    except RuntimeError as e:
+        log = logging.getLogger(LOGGER_NAME)
+        log.error("isolated sync failed: %s", e)
+        return SyncResult(False, str(e))
+    r = resp.get("result") or {}
+    return SyncResult(bool(r.get("ok")), str(r.get("message") or ""), int(r.get("count") or 0))
 
 
 def run_keep_worker() -> int:
@@ -733,6 +764,16 @@ def run_keep_worker() -> int:
     the JSON reply to the file named by KEEP_SYNC_WORKER_OUT. A hard crash
     here leaves that file absent -- the parent treats that as a crash."""
     import base64
+
+    # The worker is throwaway and its stderr is a pipe the parent reads, so
+    # arm faulthandler to stderr even on Windows -- a native crash here
+    # (the thing this whole worker exists to contain) then leaves a real
+    # traceback the parent can log, instead of just an exit code.
+    try:
+        if sys.stderr is not None:
+            faulthandler.enable(file=sys.stderr, all_threads=True)
+    except Exception:
+        pass
 
     out_path = os.environ.get(KEEP_WORKER_OUT_ENV, "")
     try:
@@ -744,6 +785,11 @@ def run_keep_worker() -> int:
                 Path(req["state_dir"]), req.get("include_archived", False),
             )
             reply = {"ok": True, "titles": titles}
+        elif req.get("op") == "sync":
+            res = sync_once(req["cfg"])
+            reply = {"ok": True, "result": {
+                "ok": res.ok, "message": res.message, "count": res.notes_count,
+            }}
         else:
             reply = {"ok": False, "error": f"unknown op {req.get('op')!r}"}
     except BaseException as e:
