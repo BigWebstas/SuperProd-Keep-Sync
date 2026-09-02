@@ -702,7 +702,12 @@ def _spawn_keep_worker(request: dict, timeout: float) -> dict:
             resp = None
 
         if resp is None:
-            tail = ((proc.stderr or "").strip().splitlines() or [""])[-1]
+            stderr = (proc.stderr or "").strip()
+            if stderr:
+                logging.getLogger(LOGGER_NAME).error(
+                    "Keep helper (exit %s) stderr:\n%s", proc.returncode, stderr
+                )
+            tail = (stderr.splitlines() or [""])[-1]
             raise RuntimeError(
                 f"the Keep helper crashed (exit {proc.returncode}"
                 + (f", {tail}" if tail else "") + ")"
@@ -759,6 +764,16 @@ def run_keep_worker() -> int:
     the JSON reply to the file named by KEEP_SYNC_WORKER_OUT. A hard crash
     here leaves that file absent -- the parent treats that as a crash."""
     import base64
+
+    # The worker is throwaway and its stderr is a pipe the parent reads, so
+    # arm faulthandler to stderr even on Windows -- a native crash here
+    # (the thing this whole worker exists to contain) then leaves a real
+    # traceback the parent can log, instead of just an exit code.
+    try:
+        if sys.stderr is not None:
+            faulthandler.enable(file=sys.stderr, all_threads=True)
+    except Exception:
+        pass
 
     out_path = os.environ.get(KEEP_WORKER_OUT_ENV, "")
     try:
