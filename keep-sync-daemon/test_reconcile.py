@@ -408,6 +408,69 @@ class GoogleCacheGuardTests(unittest.TestCase):
         self.assertFalse(p.exists())
 
 
+class KeepWorkerTests(unittest.TestCase):
+    """The isolated-subprocess Keep-titles helper."""
+
+    def _out(self):
+        import tempfile
+        fd, p = tempfile.mkstemp(suffix=".json")
+        __import__("os").close(fd)
+        self.addCleanup(lambda: __import__("os").unlink(p) if __import__("os").path.exists(p) else None)
+        return p
+
+    def test_worker_writes_ok_reply(self):
+        import base64, json, os
+        out = self._out()
+        req = base64.b64encode(json.dumps({"op": "titles", "email": "e", "master_token": "t",
+                                           "state_dir": "/x"}).encode()).decode()
+        env = {core.KEEP_WORKER_REQUEST_ENV: req, core.KEEP_WORKER_OUT_ENV: out}
+        with unittest.mock.patch.object(core, "list_keep_checklist_titles", return_value=["B", "a"]):
+            with unittest.mock.patch.dict(os.environ, env):
+                self.assertEqual(core.run_keep_worker(), 0)
+        self.assertEqual(json.loads(core.Path(out).read_text()), {"ok": True, "titles": ["B", "a"]})
+
+    def test_worker_reports_error(self):
+        import base64, json, os
+        out = self._out()
+        req = base64.b64encode(json.dumps({"op": "titles", "email": "e", "master_token": "t",
+                                           "state_dir": "/x"}).encode()).decode()
+        env = {core.KEEP_WORKER_REQUEST_ENV: req, core.KEEP_WORKER_OUT_ENV: out}
+        with unittest.mock.patch.object(core, "list_keep_checklist_titles", side_effect=ValueError("nope")):
+            with unittest.mock.patch.dict(os.environ, env):
+                self.assertEqual(core.run_keep_worker(), 1)
+        self.assertFalse(json.loads(core.Path(out).read_text())["ok"])
+
+    def test_isolated_raises_when_child_leaves_no_reply(self):
+        import subprocess
+
+        class FakeProc:
+            returncode = 3221225477  # 0xC0000005 access violation
+            stderr = ""
+
+        with unittest.mock.patch("subprocess.run", return_value=FakeProc()):
+            with self.assertRaises(RuntimeError) as cm:
+                core.list_keep_checklist_titles_isolated("e", "t", core.Path("/x"))
+        self.assertIn("crashed", str(cm.exception))
+
+    def test_isolated_returns_titles_from_reply_file(self):
+        import json, os
+
+        def fake_run(argv, **kw):
+            out = kw["env"][core.KEEP_WORKER_OUT_ENV]
+            with open(out, "w") as fh:
+                json.dump({"ok": True, "titles": ["x"]}, fh)
+
+            class P:
+                returncode = 0
+                stderr = ""
+            return P()
+
+        with unittest.mock.patch("subprocess.run", side_effect=fake_run):
+            self.assertEqual(
+                core.list_keep_checklist_titles_isolated("e", "t", core.Path("/x")), ["x"]
+            )
+
+
 class VersionTests(unittest.TestCase):
     def test_returns_non_empty_string(self):
         v = core.get_version()

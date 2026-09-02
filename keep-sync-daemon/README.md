@@ -82,9 +82,11 @@ so keep it in a stable folder.
 
 ## Logs
 
-Every entry point writes a rotating log (10MB × 3) and, beside it, a
-`*.fault.log` that captures native crashes (segfaults, `SIGABRT`) that never
-reach Python:
+Every entry point writes a rotating log (10MB × 3). On **Linux** a sibling
+`*.fault.log` also captures native crashes (segfaults, `SIGABRT`). On Windows the
+`faulthandler` exception hook is left off — there it fires on first-chance
+exceptions that are actually caught and handled, which just reads as a fatal
+crash.
 
 | Entry point | Log file |
 | --- | --- |
@@ -105,6 +107,9 @@ reach Python:
 - The Qt tray also routes Qt's own warnings (`Qt: ...` lines) into the log, and
   crashes inside a tray menu action are logged with a traceback instead of
   taking the tray down silently.
+- "Connect & load lists" runs the Keep pull in a short-lived child process, so if
+  the frozen build hard-crashes parsing Google's response the setup window just
+  shows an error instead of dying.
 
 ## Scheduling the CLI daemon
 

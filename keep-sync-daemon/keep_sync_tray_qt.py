@@ -267,7 +267,7 @@ class SetupDialog(QDialog):
             return
 
         try:
-            titles = core.list_keep_checklist_titles(
+            titles = core.list_keep_checklist_titles_isolated(
                 email, master_token, state_dir, self.cfg.get("include_archived", False)
             )
         except Exception as e:
@@ -576,6 +576,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if os.environ.get(core.KEEP_WORKER_ENV) == "1":
+        raise SystemExit(core.run_keep_worker())
     if os.environ.get("KEEP_SYNC_TRAY_SELFTEST") == "1":
         raise SystemExit(run_selftest())
     try:
