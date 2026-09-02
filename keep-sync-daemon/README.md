@@ -82,7 +82,7 @@ so keep it in a stable folder.
 
 ## Logs
 
-Every entry point writes a rotating log (10MB × 3). On **Linux** a sibling
+Every entry point writes a log rotated daily at midnight, 7 days kept. On **Linux** a sibling
 `*.fault.log` also captures native crashes (segfaults, `SIGABRT`). On Windows the
 `faulthandler` exception hook is left off — there it fires on first-chance
 exceptions that are actually caught and handled, which just reads as a fatal
