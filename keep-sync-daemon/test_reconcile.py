@@ -386,6 +386,14 @@ class GoogleCacheGuardTests(unittest.TestCase):
         core.load_google_state_cache(p)
         self.assertTrue(gc.isenabled())
 
+    def test_sync_once_re_enables_gc_even_on_error(self):
+        import gc
+        with unittest.mock.patch.object(core, "_sync_once", side_effect=RuntimeError("boom")):
+            self.assertTrue(gc.isenabled())
+            with self.assertRaises(RuntimeError):
+                core.sync_once({"state_dir": self._tmp().parent})
+            self.assertTrue(gc.isenabled())
+
     def test_env_kill_switch_disables_cache(self):
         p = self._tmp()
         p.write_text('{"a": 1}', encoding="utf-8")
