@@ -40,11 +40,11 @@ class FakeSP:
     def list_tasks(self, project_id, include_done=True, source="active"):
         return [t for t in self.tasks.values() if t.project_id == project_id]
 
-    def add_task(self, title, project_id, is_done=False, tag_ids=None):
+    def add_task(self, title, project_id, is_done=False, tag_ids=None, time_estimate_ms=None):
         tid = f"sp{self._next}"
         self._next += 1
         self.tasks[tid] = sp_client.SPTask(tid, title, bool(is_done), None, project_id)
-        self.calls.append(("add", tid, title, is_done, tag_ids))
+        self.calls.append(("add", tid, title, is_done, tag_ids, time_estimate_ms))
         return tid
 
     def update_task(self, task_id, patch):
@@ -316,6 +316,44 @@ class NewTaskTagTests(unittest.TestCase):
         self.assertIsNone(self._add_call(sp)[4])
 
 
+class DefaultTaskEstimateTests(unittest.TestCase):
+    """cfg['sp_default_task_minutes'] -> tasks created from Keep items get a
+    `timeEstimate` in ms."""
+
+    def _add_call(self, sp):
+        return next(c for c in sp.calls if c[0] == "add")
+
+    def test_no_estimate_configured_passes_none(self):
+        note, _ = make_list(items=[("buy milk", False)])
+        sp = FakeSP()
+        core.reconcile_sp(cfg(), FakeKeep([note]), sp, {})
+        self.assertIsNone(self._add_call(sp)[5])
+
+    def test_configured_minutes_become_milliseconds(self):
+        note, _ = make_list(items=[("buy milk", False)])
+        sp = FakeSP()
+        c = cfg()
+        c["sp_default_task_minutes"] = 15
+        core.reconcile_sp(c, FakeKeep([note]), sp, {})
+        self.assertEqual(self._add_call(sp)[5], 15 * 60_000)
+
+    def test_zero_minutes_is_treated_as_none(self):
+        note, _ = make_list(items=[("buy milk", False)])
+        sp = FakeSP()
+        c = cfg()
+        c["sp_default_task_minutes"] = 0
+        core.reconcile_sp(c, FakeKeep([note]), sp, {})
+        self.assertIsNone(self._add_call(sp)[5])
+
+    def test_junk_value_is_treated_as_none(self):
+        note, _ = make_list(items=[("buy milk", False)])
+        sp = FakeSP()
+        c = cfg()
+        c["sp_default_task_minutes"] = "not a number"
+        core.reconcile_sp(c, FakeKeep([note]), sp, {})
+        self.assertIsNone(self._add_call(sp)[5])
+
+
 class SPClientAddTaskTests(unittest.TestCase):
     def test_add_task_puts_tag_ids_in_payload(self):
         seen = {}
@@ -329,6 +367,23 @@ class SPClientAddTaskTests(unittest.TestCase):
         seen.clear()
         client.add_task("t", "proj", False)
         self.assertNotIn("tagIds", seen["json"])
+
+    def test_add_task_puts_time_estimate_in_payload(self):
+        seen = {}
+
+        client = sp_client.SPClient("http://x", "tok")
+        client._request = lambda method, path, **kw: (seen.update(kw), "new-id")[1]
+
+        client.add_task("t", "proj", False, time_estimate_ms=900_000)
+        self.assertEqual(seen["json"]["timeEstimate"], 900_000)
+
+        seen.clear()
+        client.add_task("t", "proj", False)
+        self.assertNotIn("timeEstimate", seen["json"])
+
+        seen.clear()
+        client.add_task("t", "proj", False, time_estimate_ms=0)
+        self.assertNotIn("timeEstimate", seen["json"])
 
 
 class GoogleCacheGuardTests(unittest.TestCase):

@@ -431,8 +431,20 @@ def load_config(config_path: Path) -> dict:
     cfg.setdefault("sp_access_token", "")
     cfg.setdefault("sp_project_id", "")
     cfg.setdefault("sp_new_task_tag_id", "")
+    cfg.setdefault("sp_default_task_minutes", 0)
     cfg.setdefault("keep_note_title", "")
     return cfg
+
+
+def _default_task_estimate_ms(cfg: dict) -> "int | None":
+    """Config's `sp_default_task_minutes` as milliseconds for SP's
+    `timeEstimate`, or None when unset / zero / unparseable. SP only takes
+    a time estimate at task creation, so this rides on add_task only."""
+    try:
+        minutes = int(cfg.get("sp_default_task_minutes") or 0)
+    except (TypeError, ValueError):
+        return None
+    return minutes * 60_000 if minutes > 0 else None
 
 
 def atomic_write_json(path: Path, data: dict, mode: int = 0o600, indent: "int | None" = 2) -> None:
@@ -859,6 +871,10 @@ def reconcile_sp(cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", ite
     # at creation, so this never touches tasks that already exist.
     new_task_tag_id = (cfg.get("sp_new_task_tag_id") or "").strip()
     new_task_tag_ids = [new_task_tag_id] if new_task_tag_id else None
+    # Optional: give every task created from a Keep item a default time
+    # estimate (SP's `timeEstimate`). Like tags, SP's REST API only accepts
+    # this at creation, so existing tasks are never touched.
+    new_task_estimate_ms = _default_task_estimate_ms(cfg)
 
     note = find_keep_list(keep, note_title, cfg.get("include_archived", False))
     if note is None:
@@ -907,7 +923,10 @@ def reconcile_sp(cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", ite
             entry["text"] = item.text
             entry["checked"] = bool(item.checked)
         else:
-            task_id = sp.add_task(item.text, project_id, bool(item.checked), tag_ids=new_task_tag_ids)
+            task_id = sp.add_task(
+                item.text, project_id, bool(item.checked),
+                tag_ids=new_task_tag_ids, time_estimate_ms=new_task_estimate_ms,
+            )
             note_map[item.id] = {"taskId": task_id, "text": item.text, "checked": bool(item.checked)}
             res.created_sp += 1
 

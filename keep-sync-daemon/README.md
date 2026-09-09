@@ -27,7 +27,8 @@ cp config.example.json config.json
 
 Edit `config.json`: `email`, `sp_access_token`, `sp_project_id` (from
 `GET http://127.0.0.1:3876/projects`), and `keep_note_title` (the exact Keep
-checklist title).
+checklist title). Optional: `sp_default_task_minutes` gives every task created
+from a Keep item that time estimate in minutes (`0` = none).
 
 ## 3. Master token (one-time, the fiddly part)
 
@@ -74,8 +75,9 @@ pyinstaller --onefile --windowed --name KeepSyncTray keep_sync_tray.py
 
 First launch shows a setup window: Google email, OAuth Token (same manual step as
 above), SP Access Token → **Connect & load lists** → pick the Keep list and SP
-project, optionally a tag to put on every task created from a Keep item → set an
-interval → optionally "start at login" (per-user, no admin) → **Save & Start
+project, optionally a tag and a default time estimate to put on every task
+created from a Keep item → set an interval → optionally "start at login"
+(per-user, no admin) → **Save & Start
 Syncing**. The tray menu has Show status, Sync now, Open data folder, Reconfigure,
 and Quit. `config.json` and the autostart entry are written next to the binary,
 so keep it in a stable folder.

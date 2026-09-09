@@ -174,10 +174,13 @@ class SPClient:
     def add_task(
         self, title: str, project_id: str, is_done: bool = False,
         tag_ids: "list[str] | None" = None,
+        time_estimate_ms: "int | None" = None,
     ) -> str:
         payload = {"title": title, "projectId": project_id, "isDone": bool(is_done)}
         if tag_ids:
             payload["tagIds"] = list(tag_ids)
+        if time_estimate_ms and time_estimate_ms > 0:
+            payload["timeEstimate"] = int(time_estimate_ms)
         data = self._request("POST", "/tasks", json=payload)
         if isinstance(data, str):
             return data

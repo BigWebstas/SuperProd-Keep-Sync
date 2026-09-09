@@ -58,6 +58,7 @@ def default_config() -> dict:
         "sp_access_token": "",
         "sp_project_id": "",
         "sp_new_task_tag_id": "",
+        "sp_default_task_minutes": 0,
         "keep_note_title": "",
     }
 
@@ -178,23 +179,27 @@ class SetupWindow(tk.Tk):
         self.tag_combo = ttk.Combobox(self, textvariable=self.tag_var, width=34, state="disabled")
         self.tag_combo.grid(row=8, column=1, **pad)
 
-        tk.Label(self, text="Sync every (minutes):").grid(row=9, column=0, sticky="e", **pad)
+        tk.Label(self, text="Default task estimate (minutes, 0 = none):").grid(row=9, column=0, sticky="e", **pad)
+        self.estimate_var = tk.StringVar(value=str(self.cfg.get("sp_default_task_minutes", 0) or 0))
+        tk.Entry(self, textvariable=self.estimate_var, width=8).grid(row=9, column=1, sticky="w", **pad)
+
+        tk.Label(self, text="Sync every (minutes):").grid(row=10, column=0, sticky="e", **pad)
         self.interval_var = tk.StringVar(
             value=str(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES))
         )
-        tk.Entry(self, textvariable=self.interval_var, width=8).grid(row=9, column=1, sticky="w", **pad)
+        tk.Entry(self, textvariable=self.interval_var, width=8).grid(row=10, column=1, sticky="w", **pad)
 
         self.startup_var = tk.BooleanVar(value=self.cfg.get("run_at_startup", False))
         tk.Checkbutton(
             self, text="Start automatically when Windows starts", variable=self.startup_var
-        ).grid(row=10, column=0, columnspan=2, sticky="w", **pad)
+        ).grid(row=11, column=0, columnspan=2, sticky="w", **pad)
 
         self.status_var = tk.StringVar(value="")
         self.status_label = tk.Label(self, textvariable=self.status_var, fg="red", wraplength=380, justify="left")
-        self.status_label.grid(row=11, column=0, columnspan=2, **pad)
+        self.status_label.grid(row=12, column=0, columnspan=2, **pad)
 
         self.submit_btn = tk.Button(self, text="Save & Start Syncing", command=self._submit, state="disabled")
-        self.submit_btn.grid(row=12, column=0, columnspan=2, pady=10)
+        self.submit_btn.grid(row=13, column=0, columnspan=2, pady=10)
 
     def _cancel(self) -> None:
         self.result = None
@@ -293,6 +298,15 @@ class SetupWindow(tk.Tk):
             self.status_var.set("Sync interval must be a whole number of minutes (1 or more).")
             return
 
+        try:
+            estimate_minutes = int(self.estimate_var.get().strip() or "0")
+            if estimate_minutes < 0:
+                raise ValueError
+        except ValueError:
+            self.status_label.config(fg="red")
+            self.status_var.set("Default task estimate must be 0 or a positive whole number of minutes.")
+            return
+
         note_title = self.note_var.get().strip()
         project_title = self.project_var.get().strip()
         project_titles = list(self.project_combo.cget("values"))
@@ -326,6 +340,7 @@ class SetupWindow(tk.Tk):
             sp_access_token=self.sp_token_var.get().strip(),
             sp_project_id=project_id,
             sp_new_task_tag_id=tag_id,
+            sp_default_task_minutes=estimate_minutes,
             keep_note_title=note_title,
         )
         core.save_config(CONFIG_PATH, self.cfg)

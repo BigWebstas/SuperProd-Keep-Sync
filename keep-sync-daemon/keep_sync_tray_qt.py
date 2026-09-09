@@ -71,6 +71,7 @@ def default_config() -> dict:
         "sp_access_token": "",
         "sp_project_id": "",
         "sp_new_task_tag_id": "",
+        "sp_default_task_minutes": 0,
         "keep_note_title": "",
     }
 
@@ -213,6 +214,14 @@ class SetupDialog(QDialog):
         layout.addWidget(self.tag_combo, row, 1)
         row += 1
 
+        layout.addWidget(QLabel("Default task estimate (minutes, 0 = none):"), row, 0)
+        self.estimate_spin = QSpinBox()
+        self.estimate_spin.setMinimum(0)
+        self.estimate_spin.setMaximum(24 * 60)
+        self.estimate_spin.setValue(int(self.cfg.get("sp_default_task_minutes", 0) or 0))
+        layout.addWidget(self.estimate_spin, row, 1)
+        row += 1
+
         layout.addWidget(QLabel("Sync every (minutes):"), row, 0)
         self.interval_spin = QSpinBox()
         self.interval_spin.setMinimum(1)
@@ -340,6 +349,7 @@ class SetupDialog(QDialog):
             sp_access_token=self.sp_token_edit.text().strip(),
             sp_project_id=self._project_ids[project_idx],
             sp_new_task_tag_id=tag_id,
+            sp_default_task_minutes=self.estimate_spin.value(),
             keep_note_title=note_title,
         )
         core.save_config(CONFIG_PATH, self.cfg)
