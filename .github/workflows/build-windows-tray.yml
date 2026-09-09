@@ -99,7 +99,16 @@ jobs:
       # when there's no real display (as in this headless self-test).
       - name: Install Qt runtime libraries
         run: |
-          sudo apt-get update
+          # The hosted runner image bundles third-party apt sources
+          # (google-chrome, microsoft-prod) that periodically serve a bad
+          # index -- and one broken list makes `apt-get update` exit 100,
+          # which kills this step even though every package we need is in
+          # the base Ubuntu repos. Drop those extras, and don't let a stale
+          # index alone fail the step; the install below still errors hard
+          # if a package is genuinely missing.
+          sudo rm -f /etc/apt/sources.list.d/*google*  /etc/apt/sources.list.d/*chrome* \
+                     /etc/apt/sources.list.d/*microsoft* /etc/apt/sources.list.d/*msprod*
+          sudo apt-get update || true
           sudo apt-get install -y \
             libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
             libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
