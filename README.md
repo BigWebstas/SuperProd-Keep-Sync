@@ -40,6 +40,7 @@ be running for a pass to change anything on the SP side.
 | Deletes | Never propagate — deliberately, so a background loop is never destructive |
 | Nested sub-items / subtasks | Not mapped; SP subtasks are skipped SP → Keep |
 | Conflict (both sides changed) | Keep wins |
+| Keep auth failure alert | If the master token goes stale/revoked or Google can't be reached, a "⚠️ Keep Sync needs attention" task is created in the synced SP project (find-or-create, not one per failed pass) and auto-resolved once Keep is reachable again |
 
 Every entry point also checks GitHub for a newer release at most once a day
 (cached in `<state_dir>/update_check.json`) and reports it — a tray notification

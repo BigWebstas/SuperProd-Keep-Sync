@@ -40,11 +40,11 @@ class FakeSP:
     def list_tasks(self, project_id, include_done=True, source="active"):
         return [t for t in self.tasks.values() if t.project_id == project_id]
 
-    def add_task(self, title, project_id, is_done=False, tag_ids=None, time_estimate_ms=None):
+    def add_task(self, title, project_id, is_done=False, tag_ids=None, time_estimate_ms=None, notes=None):
         tid = f"sp{self._next}"
         self._next += 1
         self.tasks[tid] = sp_client.SPTask(tid, title, bool(is_done), None, project_id)
-        self.calls.append(("add", tid, title, is_done, tag_ids, time_estimate_ms))
+        self.calls.append(("add", tid, title, is_done, tag_ids, time_estimate_ms, notes))
         return tid
 
     def update_task(self, task_id, patch):
@@ -400,6 +400,78 @@ class SPClientAddTaskTests(unittest.TestCase):
         seen.clear()
         client.add_task("t", "proj", False, time_estimate_ms=0)
         self.assertNotIn("timeEstimate", seen["json"])
+
+    def test_add_task_puts_notes_in_payload(self):
+        seen = {}
+
+        client = sp_client.SPClient("http://x", "tok")
+        client._request = lambda method, path, **kw: (seen.update(kw), "new-id")[1]
+
+        client.add_task("t", "proj", False, notes="detail")
+        self.assertEqual(seen["json"]["notes"], "detail")
+
+        seen.clear()
+        client.add_task("t", "proj", False)
+        self.assertNotIn("notes", seen["json"])
+
+
+class KeepFailureAlertTests(unittest.TestCase):
+    """core._notify_sp_of_keep_failure / _clear_sp_keep_alert: a stale token
+    or unreachable Google drops one find-or-create task in SP; it clears
+    itself once Keep is healthy again."""
+
+    def _add_calls(self, sp):
+        return [c for c in sp.calls if c[0] == "add"]
+
+    def _update_calls(self, sp):
+        return [c for c in sp.calls if c[0] == "update"]
+
+    def test_creates_alert_task_with_detail_in_notes(self):
+        sp = FakeSP()
+        core._notify_sp_of_keep_failure(sp, "p1", "Google login failed")
+        calls = self._add_calls(sp)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][2], core.KEEP_AUTH_ALERT_TITLE)
+
+    def test_no_project_id_is_a_noop(self):
+        sp = FakeSP()
+        core._notify_sp_of_keep_failure(sp, "", "detail")
+        self.assertEqual(sp.calls, [])
+
+    def test_does_not_duplicate_an_open_alert(self):
+        sp = FakeSP([sp_client.SPTask("t1", core.KEEP_AUTH_ALERT_TITLE, False, None, "p1")])
+        core._notify_sp_of_keep_failure(sp, "p1", "detail")
+        self.assertEqual(self._add_calls(sp), [])
+
+    def test_creates_a_fresh_alert_once_the_old_one_is_done(self):
+        sp = FakeSP([sp_client.SPTask("t1", core.KEEP_AUTH_ALERT_TITLE, True, None, "p1")])
+        core._notify_sp_of_keep_failure(sp, "p1", "detail")
+        self.assertEqual(len(self._add_calls(sp)), 1)
+
+    def test_sp_error_is_swallowed(self):
+        sp = FakeSP()
+        sp.add_task = unittest.mock.Mock(side_effect=sp_client.SPError("SP closed"))
+        core._notify_sp_of_keep_failure(sp, "p1", "detail")  # must not raise
+
+    def test_clear_marks_open_alert_done(self):
+        sp = FakeSP([sp_client.SPTask("t1", core.KEEP_AUTH_ALERT_TITLE, False, None, "p1")])
+        core._clear_sp_keep_alert(sp, "p1")
+        self.assertEqual(self._update_calls(sp), [("update", "t1", {"isDone": True})])
+
+    def test_clear_is_a_noop_when_nothing_is_open(self):
+        sp = FakeSP()
+        core._clear_sp_keep_alert(sp, "p1")
+        self.assertEqual(sp.calls, [])
+
+    def test_clear_no_project_id_is_a_noop(self):
+        sp = FakeSP([sp_client.SPTask("t1", core.KEEP_AUTH_ALERT_TITLE, False, None, "p1")])
+        core._clear_sp_keep_alert(sp, "")
+        self.assertEqual(sp.calls, [])
+
+    def test_clear_swallows_sp_errors(self):
+        sp = FakeSP()
+        sp.list_tasks = unittest.mock.Mock(side_effect=sp_client.SPError("SP closed"))
+        core._clear_sp_keep_alert(sp, "p1")  # must not raise
 
 
 class GoogleCacheGuardTests(unittest.TestCase):

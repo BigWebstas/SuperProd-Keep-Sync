@@ -1068,10 +1068,65 @@ class SyncResult:
     notes_count: int = 0  # kept name for the tray apps; now = number of items changed
 
 
+# A stale/revoked master token or a network outage silences the sync
+# entirely -- the tray keeps retrying every interval, but a user who isn't
+# watching the tray (or runs the headless CLI daemon) can go a long time
+# without noticing. One flagged task in the synced project surfaces it
+# somewhere they're already looking. Fixed title so it's find-or-create,
+# not a new task every failed pass.
+KEEP_AUTH_ALERT_TITLE = "⚠️ Keep Sync needs attention"
+
+
+def _notify_sp_of_keep_failure(sp: "sp_client.SPClient", project_id: str, detail: str) -> None:
+    """Best-effort: create KEEP_AUTH_ALERT_TITLE in `project_id` if one isn't
+    already open, so a stale master token or an unreachable Google shows up
+    in Super Productivity, not just the tray/log. Skips if there's no
+    project configured yet. Never raises -- this is a diagnostic breadcrumb,
+    not a sync step, and the one deliberate exception to "both sides
+    untouched on failure": Keep failed, but SP is still reachable and
+    getting told about it. If SP is also unreachable this just logs and
+    moves on, same as any other failed SP call."""
+    log = logging.getLogger(LOGGER_NAME)
+    if not project_id:
+        return
+    try:
+        already_open = any(
+            t.title == KEEP_AUTH_ALERT_TITLE and not t.is_done
+            for t in sp.list_tasks(project_id)
+        )
+        if already_open:
+            log.debug("Keep-failure alert task already open in %s; not duplicating", project_id)
+            return
+        sp.add_task(KEEP_AUTH_ALERT_TITLE, project_id, notes=detail)
+        log.info("created Keep-failure alert task in %s", project_id)
+    except Exception:
+        log.warning("could not create Keep-failure alert task in SP", exc_info=True)
+
+
+def _clear_sp_keep_alert(sp: "sp_client.SPClient", project_id: str) -> None:
+    """The other half of _notify_sp_of_keep_failure: once Keep auth/sync
+    succeeds again, mark any open KEEP_AUTH_ALERT_TITLE task done so it
+    doesn't sit there stale -- an alert that never clears trains the user to
+    ignore it. Best-effort, never raises."""
+    log = logging.getLogger(LOGGER_NAME)
+    if not project_id:
+        return
+    try:
+        for t in sp.list_tasks(project_id):
+            if t.title == KEEP_AUTH_ALERT_TITLE and not t.is_done:
+                sp.update_task(t.id, {"isDone": True})
+                log.info("cleared Keep-failure alert task %s in %s", t.id, project_id)
+    except Exception:
+        log.warning("could not clear Keep-failure alert task in SP", exc_info=True)
+
+
 def sync_once(cfg: dict) -> SyncResult:
     """Runs one Keep <-> Super Productivity reconcile pass. Never raises:
     on any failure both sides are left untouched, so a transient Keep
-    login error or SP being closed never corrupts either side.
+    login error or SP being closed never corrupts either side -- except a
+    stale-token/unreachable-Google failure also best-effort drops one alert
+    task in SP (see _notify_sp_of_keep_failure); that's a deliberate,
+    idempotent side note, not a sync mutation.
 
     The whole pass runs with the cyclic GC paused (see _gc_paused): a GC
     sweep landing inside `_json` while it parses Google's or SP's response
@@ -1124,14 +1179,19 @@ def _sync_once(cfg: dict) -> SyncResult:
         log.info("Keep authenticated and synced (cache_hit=%s)", bool(cached_state))
     except gkeepapi.exception.LoginException as e:
         log.error("Google login failed", exc_info=True)
-        return SyncResult(
-            False,
+        message = (
             f"Google login failed ({e}). The master token may be stale/revoked, "
-            "or Google is challenging this login. Nothing changed.",
+            "or Google is challenging this login. Nothing changed."
         )
+        _notify_sp_of_keep_failure(sp, cfg.get("sp_project_id", ""), message)
+        return SyncResult(False, message)
     except Exception as e:  # network errors, etc.
         log.error("Keep sync failed", exc_info=True)
-        return SyncResult(False, f"Keep sync failed: {e}. Nothing changed.")
+        message = f"Keep sync failed: {e}. Nothing changed."
+        _notify_sp_of_keep_failure(sp, cfg.get("sp_project_id", ""), message)
+        return SyncResult(False, message)
+
+    _clear_sp_keep_alert(sp, cfg.get("sp_project_id", ""))
 
     try:
         result = reconcile_sp(cfg, keep, sp, item_map)
