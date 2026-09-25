@@ -501,7 +501,13 @@ def load_config(config_path: Path) -> dict:
     cfg.setdefault("sp_api_base_url", DEFAULT_SP_API_BASE_URL)
     cfg.setdefault("sp_access_token", "")
     cfg.setdefault("sp_project_id", "")
+    # Display-only: the project/tag titles picked in setup, alongside the ids
+    # sync actually uses -- so the status window can show names instead of
+    # raw ids without a live SP call every time it opens. Same idea as
+    # keep_note_title, which has always stored the title directly.
+    cfg.setdefault("sp_project_title", "")
     cfg.setdefault("sp_new_task_tag_ids", [])
+    cfg.setdefault("sp_new_task_tag_titles", [])
     cfg.setdefault("sp_default_task_minutes", 0)
     cfg.setdefault("keep_note_title", "")
 

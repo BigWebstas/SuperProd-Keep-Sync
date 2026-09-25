@@ -72,7 +72,9 @@ def default_config() -> dict:
         "sp_api_base_url": core.DEFAULT_SP_API_BASE_URL,
         "sp_access_token": "",
         "sp_project_id": "",
+        "sp_project_title": "",
         "sp_new_task_tag_ids": [],
+        "sp_new_task_tag_titles": [],
         "sp_default_task_minutes": 0,
         "keep_note_title": "",
     }
@@ -339,7 +341,9 @@ class SetupDialog(QDialog):
             self.status_label.setText("Pick a Keep list and a project first (use Connect).")
             return
 
-        tag_ids = [self._tag_ids[i.row()] for i in self.tag_list.selectedIndexes()]
+        selected_rows = sorted(i.row() for i in self.tag_list.selectedIndexes())
+        tag_ids = [self._tag_ids[r] for r in selected_rows]
+        tag_titles = [self.tag_list.item(r).text() for r in selected_rows]
 
         state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
         self.cfg.update(
@@ -351,7 +355,9 @@ class SetupDialog(QDialog):
             sp_api_base_url=self.sp_url_edit.text().strip() or core.DEFAULT_SP_API_BASE_URL,
             sp_access_token=self.sp_token_edit.text().strip(),
             sp_project_id=self._project_ids[project_idx],
+            sp_project_title=self.project_combo.currentText().strip(),
             sp_new_task_tag_ids=tag_ids,
+            sp_new_task_tag_titles=tag_titles,
             sp_default_task_minutes=self.estimate_spin.value(),
             keep_note_title=note_title,
         )
@@ -381,30 +387,43 @@ class StatusDialog(QDialog):
         self.setWindowIcon(make_icon())
 
         layout = QGridLayout(self)
-        layout.addWidget(QLabel(f"Account: {app.cfg.get('email', '')}"), 0, 0, 1, 2)
+        row = 0
+        layout.addWidget(QLabel(f"Account: {app.cfg.get('email', '')}"), row, 0, 1, 2)
+        row += 1
+
+        project = app.cfg.get("sp_project_title") or app.cfg.get("sp_project_id") or "(not set)"
+        layout.addWidget(QLabel(f"Project: {project}"), row, 0, 1, 2)
+        row += 1
+
+        tags = app.cfg.get("sp_new_task_tag_titles") or app.cfg.get("sp_new_task_tag_ids") or []
+        layout.addWidget(QLabel(f"Tags on new tasks: {', '.join(tags) if tags else 'none'}"), row, 0, 1, 2)
+        row += 1
 
         self.status_label = QLabel(app.status)
         self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label, 1, 0, 1, 2)
+        layout.addWidget(self.status_label, row, 0, 1, 2)
+        row += 1
 
         sync_btn = QPushButton("Sync now")
         sync_btn.clicked.connect(app.sync_now)
-        layout.addWidget(sync_btn, 2, 0)
+        layout.addWidget(sync_btn, row, 0)
 
         reconfigure_btn = QPushButton("Reconfigure…")
         reconfigure_btn.clicked.connect(self._reconfigure)
-        layout.addWidget(reconfigure_btn, 2, 1)
+        layout.addWidget(reconfigure_btn, row, 1)
+        row += 1
 
         if app.latest_version:
             update_label = QLabel(f'Update available: <a href="{core.RELEASES_URL}">{app.latest_version}</a>')
             update_label.setStyleSheet("color: #1a7f37;")
             update_label.setOpenExternalLinks(True)
-            layout.addWidget(update_label, 3, 0, 1, 2)
+            layout.addWidget(update_label, row, 0, 1, 2)
+            row += 1
 
         version_label = QLabel(f"Version {core.get_version()}")
         version_label.setStyleSheet("color: gray;")
         version_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(version_label, 4, 0, 1, 2)
+        layout.addWidget(version_label, row, 0, 1, 2)
 
         app.status_changed.connect(self.status_label.setText)
 

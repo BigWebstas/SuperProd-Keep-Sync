@@ -58,7 +58,9 @@ def default_config() -> dict:
         "sp_api_base_url": core.DEFAULT_SP_API_BASE_URL,
         "sp_access_token": "",
         "sp_project_id": "",
+        "sp_project_title": "",
         "sp_new_task_tag_ids": [],
+        "sp_new_task_tag_titles": [],
         "sp_default_task_minutes": 0,
         "keep_note_title": "",
     }
@@ -333,7 +335,9 @@ class SetupWindow(tk.Tk):
             self.status_var.set("Pick a Keep list and a project first (use Connect).")
             return
 
-        tag_ids = [self._tag_ids[i] for i in self.tag_list.curselection() if i < len(self._tag_ids)]
+        selected_rows = [i for i in self.tag_list.curselection() if i < len(self._tag_ids)]
+        tag_ids = [self._tag_ids[i] for i in selected_rows]
+        tag_titles = [self.tag_list.get(i) for i in selected_rows]
 
         state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
         self.cfg.update(
@@ -345,7 +349,9 @@ class SetupWindow(tk.Tk):
             sp_api_base_url=self.sp_url_var.get().strip() or core.DEFAULT_SP_API_BASE_URL,
             sp_access_token=self.sp_token_var.get().strip(),
             sp_project_id=project_id,
+            sp_project_title=project_title,
             sp_new_task_tag_ids=tag_ids,
+            sp_new_task_tag_titles=tag_titles,
             sp_default_task_minutes=estimate_minutes,
             keep_note_title=note_title,
         )
@@ -380,32 +386,49 @@ class StatusWindow(tk.Tk):
         self.resizable(False, False)
 
         pad = {"padx": 10, "pady": 6}
+        row = 0
 
         tk.Label(self, text=f"Account: {app.cfg.get('email', '')}", anchor="w").grid(
-            row=0, column=0, columnspan=2, sticky="w", **pad
+            row=row, column=0, columnspan=2, sticky="w", **pad
         )
+        row += 1
+
+        project = app.cfg.get("sp_project_title") or app.cfg.get("sp_project_id") or "(not set)"
+        tk.Label(self, text=f"Project: {project}", anchor="w").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad
+        )
+        row += 1
+
+        tags = app.cfg.get("sp_new_task_tag_titles") or app.cfg.get("sp_new_task_tag_ids") or []
+        tk.Label(self, text=f"Tags on new tasks: {', '.join(tags) if tags else 'none'}", anchor="w").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad
+        )
+        row += 1
 
         self.status_var = tk.StringVar()
         tk.Label(self, textvariable=self.status_var, wraplength=340, justify="left", anchor="w").grid(
-            row=1, column=0, columnspan=2, sticky="w", **pad
+            row=row, column=0, columnspan=2, sticky="w", **pad
         )
+        row += 1
 
         tk.Button(self, text="Sync now", command=self._sync_now).grid(
-            row=2, column=0, padx=10, pady=10, sticky="ew"
+            row=row, column=0, padx=10, pady=10, sticky="ew"
         )
         tk.Button(self, text="Reconfigure…", command=self._reconfigure).grid(
-            row=2, column=1, padx=10, pady=10, sticky="ew"
+            row=row, column=1, padx=10, pady=10, sticky="ew"
         )
+        row += 1
 
         self.update_var = tk.StringVar()
         self.update_label = tk.Label(
             self, textvariable=self.update_var, anchor="w", fg="#1a7f37", cursor="hand2"
         )
-        self.update_label.grid(row=3, column=0, columnspan=2, sticky="w", **pad)
+        self.update_label.grid(row=row, column=0, columnspan=2, sticky="w", **pad)
         self.update_label.bind("<Button-1>", lambda e: webbrowser.open(core.RELEASES_URL))
+        row += 1
 
         tk.Label(self, text=f"Version {core.get_version()}", anchor="w", fg="gray").grid(
-            row=4, column=0, columnspan=2, sticky="w", **pad
+            row=row, column=0, columnspan=2, sticky="w", **pad
         )
 
         self._refresh_status()

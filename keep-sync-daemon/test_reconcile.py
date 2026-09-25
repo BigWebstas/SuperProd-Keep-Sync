@@ -611,6 +611,13 @@ class LoadConfigTagMigrationTests(unittest.TestCase):
         cfg = core.load_config(self._write({"email": "a@b.com", "sp_new_task_tag_id": "   "}))
         self.assertEqual(cfg["sp_new_task_tag_ids"], [])
 
+    def test_defaults_display_titles_to_empty(self):
+        # sp_project_title / sp_new_task_tag_titles are display-only (status
+        # window), separate from the ids sync actually uses.
+        cfg = core.load_config(self._write({"email": "a@b.com"}))
+        self.assertEqual(cfg["sp_project_title"], "")
+        self.assertEqual(cfg["sp_new_task_tag_titles"], [])
+
 
 class CheckForUpdateTests(unittest.TestCase):
     """core.check_for_update: compares against the latest GitHub release tag."""
