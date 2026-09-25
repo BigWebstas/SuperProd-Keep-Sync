@@ -54,7 +54,7 @@ def main() -> int:
     # 5-minute cron schedule doesn't turn into a GitHub API poll.
     latest = core.maybe_check_for_update(core.resolve_state_dir(cfg["state_dir"]))
     if latest:
-        print(f"[keep-sync-daemon] update available: {latest} — {core.RELEASES_URL}")
+        print(f"[keep-sync-daemon] update available: {latest.version} — {latest.url}")
 
     if result.ok:
         print(f"[keep-sync-daemon] {result.message}")

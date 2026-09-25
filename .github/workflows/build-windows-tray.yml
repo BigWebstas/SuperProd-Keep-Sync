@@ -26,9 +26,24 @@ jobs:
         run: |
           python -c "import subprocess,pathlib; v=subprocess.run(['git','describe','--tags','--always'],capture_output=True,text=True).stdout.strip() or 'unknown'; pathlib.Path('_keep_sync_version.py').write_text('__version__ = %r\n' % v); print('version:', v)"
 
+      # Inno Setup's AppVersion must be numeric-dotted (its own upgrade-detection
+      # format) -- fine on a clean tag build (v2.2.15 -> 2.2.15), but a branch
+      # smoke-test build's `git describe` (v2.2.14-2-gabc123-dirty) isn't, so this
+      # falls back to just the leading X.Y.Z rather than failing iscc later.
+      # VersionTag keeps the full describe string for the installer's filename.
+      - name: Compute installer version strings
+        id: version
+        run: |
+          $tag = (git describe --tags --always).Trim()
+          if (-not $tag) { $tag = "unknown" }
+          if ($tag -match '^v?(\d+\.\d+\.\d+)') { $numeric = $Matches[1] } else { $numeric = "0.0.0" }
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+          echo "numeric=$numeric" >> $env:GITHUB_OUTPUT
+
       - name: Build exe
         run: >-
           pyinstaller --onefile --windowed --name KeepSyncTray
+          --icon packaging\windows\keepsync.ico
           --copy-metadata gpsoauth --copy-metadata gkeepapi
           --hidden-import _keep_sync_version
           keep_sync_tray.py
@@ -74,10 +89,21 @@ jobs:
             throw "KeepSyncTray.exe self-test exited with code $($proc.ExitCode)"
           }
 
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        run: >-
+          iscc /DAppVersion=${{ steps.version.outputs.numeric }}
+          /DVersionTag=${{ steps.version.outputs.tag }}
+          installer\KeepSyncTray.iss
+
       - uses: actions/upload-artifact@v4
         with:
           name: KeepSyncTray
-          path: keep-sync-daemon/dist/KeepSyncTray.exe
+          path: |
+            keep-sync-daemon/dist/KeepSyncTray.exe
+            keep-sync-daemon/dist/KeepSyncTray-Setup-*.exe
           if-no-files-found: error
 
   linux-qt:

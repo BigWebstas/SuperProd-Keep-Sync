@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -42,9 +42,11 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QSystemTrayIcon,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -131,11 +133,11 @@ def make_icon() -> QIcon:
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor("#4285F4"))
+    painter.setBrush(QColor("#1F6FEB"))
     painter.drawEllipse(2, 2, 60, 60)
     painter.setBrush(QColor("white"))
     painter.drawRect(18, 16, 28, 32)
-    painter.setPen(QColor("#4285F4"))
+    painter.setPen(QColor("#1F6FEB"))
     for y in (24, 32, 40):
         painter.drawLine(22, y, 42, y)
     painter.end()
@@ -424,8 +426,8 @@ class StatusDialog(QDialog):
         layout.addWidget(reconfigure_btn, row, 1)
         row += 1
 
-        if app.latest_version:
-            update_label = QLabel(f'Update available: <a href="{core.RELEASES_URL}">{app.latest_version}</a>')
+        if app.update_info:
+            update_label = QLabel(f'Update available: <a href="{app.update_info.url}">{app.update_info.version}</a>')
             update_label.setStyleSheet("color: #1a7f37;")
             update_label.setOpenExternalLinks(True)
             layout.addWidget(update_label, row, 0, 1, 2)
@@ -443,6 +445,52 @@ class StatusDialog(QDialog):
         self.app.reconfigure()
 
 
+class DownloadProgressDialog(QDialog):
+    """Shown while an update installer downloads (see TrayApp._start_download).
+    No close button -- the download is short and the whole point is that the
+    user asked for it; let it finish rather than offer a half state to
+    manage. Percent comes from TrayApp.download_progress, a queued
+    cross-thread signal (the download itself runs on a worker thread)."""
+
+    def __init__(self, version: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(make_icon())
+        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Downloading {version}…"))
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        layout.addWidget(self.bar)
+
+    def set_percent(self, percent: int) -> None:
+        self.bar.setValue(percent)
+
+
+class InstallReadyDialog(QDialog):
+    """Shown once the installer has finished downloading. Launching it quits
+    this tray first (see TrayApp._launch_installer) -- the installer will
+    want to overwrite the running exe."""
+
+    def __init__(self, version: str, on_launch, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(make_icon())
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"{version} has been downloaded."))
+
+        row = QHBoxLayout()
+        later_btn = QPushButton("Later")
+        later_btn.clicked.connect(self.reject)
+        row.addWidget(later_btn)
+        launch_btn = QPushButton("Launch installer")
+        launch_btn.clicked.connect(lambda: (on_launch(), self.accept()))
+        row.addWidget(launch_btn)
+        layout.addLayout(row)
+
+
 class TrayApp(QObject):
     status_changed = Signal(str)
     # Emitted from the sync worker thread; the connected slot runs on the
@@ -450,6 +498,11 @@ class TrayApp(QObject):
     # behaviour in Qt and can take the process down natively (no Python
     # traceback), so every tray call goes through here.
     notify = Signal(str, str)
+    # Emitted from the download worker thread; queued to the GUI thread same
+    # as the two above.
+    download_progress = Signal(int)
+    download_finished = Signal(str)  # downloaded installer path
+    download_failed = Signal(str)  # error message
 
     def __init__(self, cfg: dict):
         super().__init__()
@@ -458,8 +511,12 @@ class TrayApp(QObject):
         self.stop_event = threading.Event()
         self._scheduler_thread: threading.Thread | None = None
         self._status_dialog: StatusDialog | None = None
-        self.latest_version: str | None = None
+        self.update_info: "core.UpdateInfo | None" = None
         self._notified_update_version: str | None = None
+        self._download_in_flight = False
+        self._downloaded_installer_path: str | None = None
+        self._progress_dialog: DownloadProgressDialog | None = None
+        self._update_action_connected = False
 
         self.tray_icon = QSystemTrayIcon(make_icon())
         self.tray_icon.setToolTip(f"{APP_NAME} — starting…")
@@ -474,11 +531,21 @@ class TrayApp(QObject):
         self._menu.addAction("Open data folder", self.open_data_folder)
         self._menu.addAction("Reconfigure…", self.reconfigure)
         self._menu.addSeparator()
+        # Hidden until an update is found; _refresh_update_action() drives
+        # its text/enabled state through the whole check -> download ->
+        # install cycle from here on.
+        self._update_action = QAction("")
+        self._update_action.setVisible(False)
+        self._menu.addAction(self._update_action)
+        self._menu.addSeparator()
         self._menu.addAction("Quit", self.quit)
         self.tray_icon.setContextMenu(self._menu)
 
         self.status_changed.connect(self._update_tooltip)
         self.notify.connect(self._show_notification)
+        self.download_progress.connect(self._on_download_progress)
+        self.download_finished.connect(self._on_download_finished)
+        self.download_failed.connect(self._on_download_failed)
 
     @core.log_callback_errors("tray notification")
     def _show_notification(self, title: str, message: str) -> None:
@@ -528,12 +595,108 @@ class TrayApp(QObject):
         once a day (see its docstring), so calling this every sync tick is
         fine. Notifies once per newly-seen version, not on every sync."""
         state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
-        latest = core.maybe_check_for_update(state_dir)
-        self.latest_version = latest
-        if latest and latest != self._notified_update_version:
-            self._notified_update_version = latest
-            log.info("update available: %s", latest)
-            self.notify.emit(f"{APP_NAME} update available", f"{latest} is out — {core.RELEASES_URL}")
+        info = core.maybe_check_for_update(state_dir)
+        self.update_info = info
+        if info and info.version != self._notified_update_version:
+            self._notified_update_version = info.version
+            self._downloaded_installer_path = None
+            log.info("update available: %s", info.version)
+            self.notify.emit(f"{APP_NAME} update available", f"{info.version} is out — {info.url}")
+        self._refresh_update_action()
+
+    def _refresh_update_action(self) -> None:
+        """Drives self._update_action's text/enabled state and click target
+        through the whole cycle: hidden -> "Download" -> "Downloading… NN%"
+        (disabled) -> "Launch installer". Reconnecting `triggered` each time
+        needs the old connection dropped first, or clicks stack up and fire
+        the previous handler too."""
+        if self._update_action_connected:
+            self._update_action.triggered.disconnect()
+            self._update_action_connected = False
+
+        info = self.update_info
+        if info is None:
+            self._update_action.setVisible(False)
+            return
+
+        def connect(slot) -> None:
+            self._update_action.triggered.connect(slot)
+            self._update_action_connected = True
+
+        self._update_action.setVisible(True)
+        if self._downloaded_installer_path:
+            self._update_action.setText(f"✓ {info.version} downloaded — Launch installer")
+            self._update_action.setEnabled(True)
+            connect(self._launch_installer)
+        elif self._download_in_flight:
+            self._update_action.setText(f"⬇ Downloading {info.version}…")
+            self._update_action.setEnabled(False)
+        elif info.asset_url:
+            self._update_action.setText(f"⬆ Update available: {info.version} — Download")
+            self._update_action.setEnabled(True)
+            connect(self._start_download)
+        else:
+            # No installer for this platform (e.g. Linux) -- just point at
+            # the release page, same as the status window's link.
+            self._update_action.setText(f"⬆ Update available: {info.version}")
+            self._update_action.setEnabled(True)
+            connect(lambda: QDesktopServices.openUrl(QUrl(info.url)))
+
+    @core.log_callback_errors("start update download")
+    def _start_download(self) -> None:
+        info = self.update_info
+        if info is None or self._download_in_flight:
+            return
+        self._download_in_flight = True
+        self._refresh_update_action()
+        self._progress_dialog = DownloadProgressDialog(info.version)
+        self._progress_dialog.show()
+        threading.Thread(target=self._download_worker, args=(info,), daemon=True, name="update-download").start()
+
+    def _download_worker(self, info: "core.UpdateInfo") -> None:
+        try:
+            state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
+            dest = core.download_update_asset(info, state_dir, progress=self.download_progress.emit)
+            self.download_finished.emit(str(dest))
+        except Exception as e:
+            log.error("update download failed", exc_info=True)
+            self.download_failed.emit(str(e))
+
+    @core.log_callback_errors("download progress")
+    def _on_download_progress(self, percent: int) -> None:
+        if self._progress_dialog is not None:
+            self._progress_dialog.set_percent(percent)
+
+    @core.log_callback_errors("download finished")
+    def _on_download_finished(self, path: str) -> None:
+        self._download_in_flight = False
+        self._downloaded_installer_path = path
+        if self._progress_dialog is not None:
+            self._progress_dialog.close()
+            self._progress_dialog = None
+        self._refresh_update_action()
+        log.info("update installer downloaded: %s", path)
+        InstallReadyDialog(self.update_info.version, self._launch_installer).exec()
+
+    @core.log_callback_errors("download failed")
+    def _on_download_failed(self, message: str) -> None:
+        self._download_in_flight = False
+        if self._progress_dialog is not None:
+            self._progress_dialog.close()
+            self._progress_dialog = None
+        self._refresh_update_action()
+        QMessageBox.warning(None, f"{APP_NAME} update", f"Could not download the update: {message}")
+
+    @core.log_callback_errors("launch installer")
+    def _launch_installer(self) -> None:
+        path = self._downloaded_installer_path
+        if not path:
+            return
+        log.info("launching installer: %s", path)
+        # The installer needs to overwrite this running exe; quit first so
+        # it isn't fighting a locked file.
+        subprocess.Popen([path], close_fds=True)
+        self.quit()
 
     @core.log_callback_errors("sync now")
     def sync_now(self) -> None:

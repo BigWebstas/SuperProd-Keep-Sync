@@ -72,8 +72,18 @@ pip install -r requirements-windows.txt   # or requirements-linux.txt
 python keep_sync_tray.py                   # or keep_sync_tray_qt.py
 
 # standalone binary:
-pyinstaller --onefile --windowed --name KeepSyncTray keep_sync_tray.py
+pyinstaller --onefile --windowed --name KeepSyncTray --icon packaging\windows\keepsync.ico keep_sync_tray.py
+
+# Windows installer (needs Inno Setup: https://jrsoftware.org/isinfo.php):
+iscc /DAppVersion=2.2.15 /DVersionTag=v2.2.15 installer\KeepSyncTray.iss
 ```
+
+On Windows, `KeepSyncTray-Setup-vX.Y.Z.exe` (built by the command above, or
+downloaded from a [release](https://github.com/BigWebstas/SuperProd-Keep-Sync/releases))
+is the easiest way to get set up: per-user install (no admin needed), an optional
+"start at login" checkbox, a Start Menu entry. `config.json` and logs live in the
+install folder either way, same as the plain `.exe`; uninstalling leaves them and
+`~/.sp-keep-sync` in place, so reinstalling picks the sync config back up.
 
 First launch shows a setup window: Google email, OAuth Token (an "Open sign-in
 page" button next to the field launches the embedded sign-in URL in your default
@@ -87,7 +97,12 @@ and Quit. `config.json` and the autostart entry are written next to the binary,
 so keep it in a stable folder.
 
 The status window also shows a link when a newer release is available (checked at
-most once a day); the tray fires a one-time notification the moment it notices.
+most once a day); the tray fires a one-time notification the moment it notices. On
+Windows the tray menu also grows an **Update available: vX.Y.Z — Download** entry;
+clicking it pops a progress window, then (once downloaded) a **Launch installer**
+window — launching quits the tray first so the installer isn't fighting a locked
+exe. On Linux, where there's no installer to launch yet, that menu entry just opens
+the release page, same as the status window's link.
 
 ## Logs
 

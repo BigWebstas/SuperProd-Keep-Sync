@@ -32,7 +32,7 @@ import signal
 import stat
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -90,6 +90,12 @@ _GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releas
 GOOGLE_EMBEDDED_SETUP_URL = "https://accounts.google.com/EmbeddedSetup"
 _VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 UPDATE_CHECK_MIN_INTERVAL_HOURS = 24.0
+# Filename prefix the "Build tray app" workflow's installer step gives the
+# Inno Setup output (installer/KeepSyncTray.iss's OutputBaseFilename) --
+# how _pick_update_asset() recognizes it in a release's asset list. Windows
+# only: there's no installer for the Linux binary, so that platform's
+# UpdateInfo.asset_url is always None and the tray falls back to a link.
+WINDOWS_INSTALLER_ASSET_PREFIX = "KeepSyncTray-Setup-"
 
 
 def _version_tuple(v: str) -> "tuple[int, int, int] | None":
@@ -97,14 +103,37 @@ def _version_tuple(v: str) -> "tuple[int, int, int] | None":
     return tuple(int(g) for g in m.groups()) if m else None
 
 
-def check_for_update(current_version: "str | None" = None, timeout: float = 5.0) -> "str | None":
-    """The latest GitHub release tag if it's newer than `current_version`
-    (default get_version()), else None -- including when GitHub is
-    unreachable, rate-limits the request, or either version string isn't a
-    clean `vX.Y.Z` release tag (a dev/dirty git-describe build skips the
-    check rather than nagging on every commit). Never raises: this is a
-    courtesy notice, not something that should ever break a sync pass or a
-    tray startup."""
+@dataclass
+class UpdateInfo:
+    """A newer release than the one running. `asset_url`/`asset_name` are
+    the direct download for this platform's installer, or both None when
+    the release has nothing installable for this platform (Linux today)."""
+    version: str
+    url: str
+    asset_url: "str | None" = None
+    asset_name: "str | None" = None
+
+
+def _pick_update_asset(release: dict) -> "tuple[str | None, str | None]":
+    """(download_url, filename) for this platform's installer among a
+    GitHub release's assets, or (None, None) if there isn't one."""
+    if sys.platform != "win32":
+        return None, None
+    for a in release.get("assets") or []:
+        name, url = a.get("name") or "", a.get("browser_download_url") or ""
+        if name.startswith(WINDOWS_INSTALLER_ASSET_PREFIX) and url:
+            return url, name
+    return None, None
+
+
+def check_for_update(current_version: "str | None" = None, timeout: float = 5.0) -> "UpdateInfo | None":
+    """The latest GitHub release as an UpdateInfo if it's newer than
+    `current_version` (default get_version()), else None -- including when
+    GitHub is unreachable, rate-limits the request, or either version
+    string isn't a clean `vX.Y.Z` release tag (a dev/dirty git-describe
+    build skips the check rather than nagging on every commit). Never
+    raises: this is a courtesy notice, not something that should ever break
+    a sync pass or a tray startup."""
     current_version = get_version() if current_version is None else current_version
     current = _version_tuple(current_version)
     if current is None:
@@ -115,23 +144,28 @@ def check_for_update(current_version: "str | None" = None, timeout: float = 5.0)
             headers={"Accept": "application/vnd.github+json"},
         )
         resp.raise_for_status()
-        latest_tag = (resp.json() or {}).get("tag_name", "")
+        release = resp.json() or {}
     except Exception:
         return None
-    latest = _version_tuple(latest_tag)
-    return latest_tag if (latest is not None and latest > current) else None
+    tag = release.get("tag_name", "")
+    latest = _version_tuple(tag)
+    if latest is None or latest <= current:
+        return None
+    asset_url, asset_name = _pick_update_asset(release)
+    return UpdateInfo(version=tag, url=release.get("html_url") or RELEASES_URL,
+                       asset_url=asset_url, asset_name=asset_name)
 
 
 def maybe_check_for_update(
     state_dir: Path, current_version: "str | None" = None,
     min_interval_hours: float = UPDATE_CHECK_MIN_INTERVAL_HOURS,
-) -> "str | None":
+) -> "UpdateInfo | None":
     """check_for_update(), throttled to once per `min_interval_hours` via
     `<state_dir>/update_check.json`. The CLI daemon and both tray apps can
     share one state_dir and each calls this on its own schedule (a cron run,
     a multi-minute sync loop) -- without the cache that adds up to hammering
-    GitHub's API. Returns the same as check_for_update(): a newer release
-    tag, or None. Never raises."""
+    GitHub's API. Returns the same as check_for_update(): a newer UpdateInfo,
+    or None. Never raises."""
     cache_path = state_dir / "update_check.json"
     now = datetime.now(timezone.utc).timestamp()
     current_version = get_version() if current_version is None else current_version
@@ -142,16 +176,52 @@ def maybe_check_for_update(
         cached = None
 
     if isinstance(cached, dict) and now - float(cached.get("checked_at", 0) or 0) < min_interval_hours * 3600:
-        latest, current = cached.get("latest") or None, _version_tuple(current_version)
-        latest_t = _version_tuple(latest or "")
-        return latest if (current and latest_t and latest_t > current) else None
+        info = cached.get("info")
+        if not info:
+            return None
+        current, latest = _version_tuple(current_version), _version_tuple(info.get("version") or "")
+        return UpdateInfo(**info) if (current and latest and latest > current) else None
 
-    latest = check_for_update(current_version)
+    found = check_for_update(current_version)
     try:
-        atomic_write_json(cache_path, {"checked_at": now, "latest": latest or ""}, mode=0o600)
+        atomic_write_json(
+            cache_path, {"checked_at": now, "info": asdict(found) if found else None}, mode=0o600,
+        )
     except OSError:
         pass
-    return latest
+    return found
+
+
+def download_update_asset(
+    info: UpdateInfo, dest_dir: Path, progress: "Callable[[int], None] | None" = None,
+    timeout: float = 600.0,
+) -> Path:
+    """Downloads `info`'s installer to `dest_dir/info.asset_name`, calling
+    `progress(percent)` (0-100) as bytes arrive -- never called if the
+    server doesn't send Content-Length (progress is unknowable, not just
+    slow). Unlike check_for_update(), this DOES raise on failure: a user
+    explicitly clicked "download", so a bad network or a release with
+    nothing installable for this platform should surface, not vanish."""
+    if not info.asset_url or not info.asset_name:
+        raise RuntimeError("No downloadable installer in this release for this platform.")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / info.asset_name
+    with requests.get(info.asset_url, stream=True, timeout=timeout) as resp:
+        resp.raise_for_status()
+        total = int(resp.headers.get("Content-Length") or 0)
+        written, last_percent = 0, -1
+        with open(dest, "wb") as fh:
+            for chunk in resp.iter_content(chunk_size=1 << 16):
+                if not chunk:
+                    continue
+                fh.write(chunk)
+                written += len(chunk)
+                if progress and total > 0:
+                    percent = min(100, int(written * 100 / total))
+                    if percent != last_percent:
+                        last_percent = percent
+                        progress(percent)
+    return dest
 
 
 def _env_flag(name: str) -> bool:

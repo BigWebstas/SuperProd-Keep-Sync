@@ -692,17 +692,21 @@ class LoadConfigTagMigrationTests(unittest.TestCase):
 
 
 class CheckForUpdateTests(unittest.TestCase):
-    """core.check_for_update: compares against the latest GitHub release tag."""
+    """core.check_for_update: compares against the latest GitHub release,
+    returning an UpdateInfo (with the Windows installer asset picked out,
+    on Windows) or None."""
 
-    def _mock_response(self, tag_name):
+    def _mock_response(self, tag_name, html_url="https://example.com/rel", assets=None):
         resp = unittest.mock.Mock()
         resp.raise_for_status = lambda: None
-        resp.json = lambda: {"tag_name": tag_name}
+        resp.json = lambda: {"tag_name": tag_name, "html_url": html_url, "assets": assets or []}
         return resp
 
     def test_newer_release_is_reported(self):
         with unittest.mock.patch.object(core.requests, "get", return_value=self._mock_response("v2.2.13")):
-            self.assertEqual(core.check_for_update("v2.2.12"), "v2.2.13")
+            info = core.check_for_update("v2.2.12")
+        self.assertEqual(info.version, "v2.2.13")
+        self.assertEqual(info.url, "https://example.com/rel")
 
     def test_same_version_returns_none(self):
         with unittest.mock.patch.object(core.requests, "get", return_value=self._mock_response("v2.2.12")):
@@ -727,6 +731,44 @@ class CheckForUpdateTests(unittest.TestCase):
         with unittest.mock.patch.object(core.requests, "get", return_value=self._mock_response("not-a-version")):
             self.assertIsNone(core.check_for_update("v2.2.12"))
 
+    def test_missing_html_url_falls_back_to_releases_url(self):
+        resp = unittest.mock.Mock()
+        resp.raise_for_status = lambda: None
+        resp.json = lambda: {"tag_name": "v2.2.13"}
+        with unittest.mock.patch.object(core.requests, "get", return_value=resp):
+            info = core.check_for_update("v2.2.12")
+        self.assertEqual(info.url, core.RELEASES_URL)
+
+    def test_windows_installer_asset_is_picked_out(self):
+        assets = [
+            {"name": "KeepSyncTrayQt", "browser_download_url": "https://x/qt"},
+            {"name": "KeepSyncTray-Setup-v2.2.13.exe", "browser_download_url": "https://x/setup.exe"},
+        ]
+        with unittest.mock.patch.object(core.sys, "platform", "win32"):
+            resp = self._mock_response("v2.2.13", assets=assets)
+            with unittest.mock.patch.object(core.requests, "get", return_value=resp):
+                info = core.check_for_update("v2.2.12")
+        self.assertEqual(info.asset_url, "https://x/setup.exe")
+        self.assertEqual(info.asset_name, "KeepSyncTray-Setup-v2.2.13.exe")
+
+    def test_no_matching_asset_leaves_asset_fields_none(self):
+        assets = [{"name": "KeepSyncTrayQt", "browser_download_url": "https://x/qt"}]
+        with unittest.mock.patch.object(core.sys, "platform", "win32"):
+            resp = self._mock_response("v2.2.13", assets=assets)
+            with unittest.mock.patch.object(core.requests, "get", return_value=resp):
+                info = core.check_for_update("v2.2.12")
+        self.assertIsNone(info.asset_url)
+        self.assertIsNone(info.asset_name)
+
+    def test_off_windows_never_picks_an_asset(self):
+        # No installer is built for this platform, whatever the release has.
+        assets = [{"name": "KeepSyncTray-Setup-v2.2.13.exe", "browser_download_url": "https://x/setup.exe"}]
+        with unittest.mock.patch.object(core.sys, "platform", "linux"):
+            resp = self._mock_response("v2.2.13", assets=assets)
+            with unittest.mock.patch.object(core.requests, "get", return_value=resp):
+                info = core.check_for_update("v2.2.12")
+        self.assertIsNone(info.asset_url)
+
 
 class MaybeCheckForUpdateTests(unittest.TestCase):
     """core.maybe_check_for_update: same as check_for_update() but cached to
@@ -740,25 +782,39 @@ class MaybeCheckForUpdateTests(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
         return Path(d)
 
+    @staticmethod
+    def _info(version="v2.2.13"):
+        return core.UpdateInfo(version=version, url="https://example.com/rel")
+
     def test_first_call_checks_and_caches(self):
         state_dir = self._tmp()
-        with unittest.mock.patch.object(core, "check_for_update", return_value="v2.2.13") as m:
+        with unittest.mock.patch.object(core, "check_for_update", return_value=self._info()) as m:
             result = core.maybe_check_for_update(state_dir, current_version="v2.2.12")
-        self.assertEqual(result, "v2.2.13")
+        self.assertEqual(result.version, "v2.2.13")
         m.assert_called_once()
         self.assertTrue((state_dir / "update_check.json").exists())
 
     def test_second_call_within_interval_skips_the_network_check(self):
         state_dir = self._tmp()
-        with unittest.mock.patch.object(core, "check_for_update", return_value="v2.2.13") as m:
+        with unittest.mock.patch.object(core, "check_for_update", return_value=self._info()) as m:
             core.maybe_check_for_update(state_dir, current_version="v2.2.12")
             result = core.maybe_check_for_update(state_dir, current_version="v2.2.12")
         m.assert_called_once()  # only the first call hit the network
-        self.assertEqual(result, "v2.2.13")
+        self.assertEqual(result.version, "v2.2.13")
+
+    def test_cached_asset_fields_round_trip(self):
+        state_dir = self._tmp()
+        info = core.UpdateInfo(version="v2.2.13", url="https://example.com/rel",
+                                asset_url="https://x/setup.exe", asset_name="KeepSyncTray-Setup-v2.2.13.exe")
+        with unittest.mock.patch.object(core, "check_for_update", return_value=info):
+            core.maybe_check_for_update(state_dir, current_version="v2.2.12")
+            result = core.maybe_check_for_update(state_dir, current_version="v2.2.12")
+        self.assertEqual(result.asset_url, "https://x/setup.exe")
+        self.assertEqual(result.asset_name, "KeepSyncTray-Setup-v2.2.13.exe")
 
     def test_expired_cache_checks_again(self):
         state_dir = self._tmp()
-        with unittest.mock.patch.object(core, "check_for_update", return_value="v2.2.13") as m:
+        with unittest.mock.patch.object(core, "check_for_update", return_value=self._info()) as m:
             core.maybe_check_for_update(state_dir, current_version="v2.2.12", min_interval_hours=0)
             core.maybe_check_for_update(state_dir, current_version="v2.2.12", min_interval_hours=0)
         self.assertEqual(m.call_count, 2)
@@ -769,6 +825,83 @@ class MaybeCheckForUpdateTests(unittest.TestCase):
         with unittest.mock.patch.object(core, "check_for_update", return_value=None) as m:
             core.maybe_check_for_update(state_dir, current_version="v2.2.12")
         m.assert_called_once()
+
+    def test_no_update_caches_none_and_stays_none_within_interval(self):
+        state_dir = self._tmp()
+        with unittest.mock.patch.object(core, "check_for_update", return_value=None) as m:
+            first = core.maybe_check_for_update(state_dir, current_version="v2.2.12")
+            second = core.maybe_check_for_update(state_dir, current_version="v2.2.12")
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        m.assert_called_once()
+
+
+class PickUpdateAssetTests(unittest.TestCase):
+    """core._pick_update_asset: Windows-only; matches by filename prefix."""
+
+    def test_off_windows_returns_none(self):
+        release = {"assets": [{"name": "KeepSyncTray-Setup-v1.exe", "browser_download_url": "https://x"}]}
+        with unittest.mock.patch.object(core.sys, "platform", "linux"):
+            self.assertEqual(core._pick_update_asset(release), (None, None))
+
+    def test_matches_by_prefix(self):
+        release = {"assets": [
+            {"name": "KeepSyncTrayQt", "browser_download_url": "https://x/qt"},
+            {"name": "KeepSyncTray-Setup-v1.2.3.exe", "browser_download_url": "https://x/setup"},
+        ]}
+        with unittest.mock.patch.object(core.sys, "platform", "win32"):
+            self.assertEqual(core._pick_update_asset(release), ("https://x/setup", "KeepSyncTray-Setup-v1.2.3.exe"))
+
+    def test_no_assets_key_returns_none(self):
+        with unittest.mock.patch.object(core.sys, "platform", "win32"):
+            self.assertEqual(core._pick_update_asset({}), (None, None))
+
+
+class DownloadUpdateAssetTests(unittest.TestCase):
+    """core.download_update_asset: streams to disk, reports 0-100 progress."""
+
+    def _tmp(self):
+        import tempfile
+        from pathlib import Path
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        return Path(d)
+
+    def _fake_response(self, body: bytes, content_length: "int | None"):
+        resp = unittest.mock.MagicMock()
+        resp.raise_for_status = lambda: None
+        resp.headers = {"Content-Length": str(content_length)} if content_length is not None else {}
+        chunk_size = 4
+        resp.iter_content = lambda chunk_size=None: [body[i:i + 4] for i in range(0, len(body), 4)]
+        resp.__enter__ = lambda self=resp: resp
+        resp.__exit__ = lambda self=resp, *a: False
+        return resp
+
+    def test_raises_without_an_asset_url(self):
+        info = core.UpdateInfo(version="v1", url="https://x")
+        with self.assertRaises(RuntimeError):
+            core.download_update_asset(info, self._tmp())
+
+    def test_downloads_and_reports_progress(self):
+        dest_dir = self._tmp()
+        body = b"x" * 20
+        info = core.UpdateInfo(version="v1", url="https://x", asset_url="https://x/a.exe", asset_name="a.exe")
+        seen = []
+        with unittest.mock.patch.object(core.requests, "get", return_value=self._fake_response(body, len(body))):
+            dest = core.download_update_asset(info, dest_dir, progress=seen.append)
+        self.assertEqual(dest, dest_dir / "a.exe")
+        self.assertEqual(dest.read_bytes(), body)
+        self.assertEqual(seen, sorted(set(seen)))  # monotonically non-decreasing
+        self.assertEqual(seen[-1], 100)
+
+    def test_no_content_length_never_calls_progress(self):
+        dest_dir = self._tmp()
+        info = core.UpdateInfo(version="v1", url="https://x", asset_url="https://x/a.exe", asset_name="a.exe")
+        seen = []
+        with unittest.mock.patch.object(core.requests, "get", return_value=self._fake_response(b"data", None)):
+            core.download_update_asset(info, dest_dir, progress=seen.append)
+        self.assertEqual(seen, [])
 
 
 if __name__ == "__main__":

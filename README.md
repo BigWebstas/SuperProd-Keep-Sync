@@ -43,9 +43,11 @@ be running for a pass to change anything on the SP side.
 | Keep auth failure alert | If the master token goes stale/revoked or Google can't be reached, a "⚠️ Keep Sync needs attention" task is created in the synced SP project (find-or-create, not one per failed pass) and auto-resolved once Keep is reachable again |
 
 Every entry point also checks GitHub for a newer release at most once a day
-(cached in `<state_dir>/update_check.json`) and reports it — a tray notification
-plus a link in its status window, or a printed line for the CLI daemon. It never
-downloads or installs anything.
+(cached in `<state_dir>/update_check.json`) and reports it. On Windows the tray
+menu grows a **Download** button that fetches the installer with a progress
+popup, then a **Launch installer** button; the Linux tray and the CLI daemon
+just get a link (there's no Linux installer yet). Nothing downloads or launches
+without you clicking it.
 
 `gkeepapi` is reverse-engineered and can break without notice; Google
 occasionally challenges logins (especially with 2FA). If it starts failing, mint

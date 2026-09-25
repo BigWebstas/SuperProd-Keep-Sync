@@ -15,13 +15,14 @@ meant to be invoked by an external scheduler (cron/systemd timer/Task
 Scheduler) instead.
 
 Packaging into a standalone .exe (see README.md for the full command):
-    pyinstaller --onefile --windowed --name KeepSyncTray keep_sync_tray.py
+    pyinstaller --onefile --windowed --name KeepSyncTray --icon packaging/windows/keepsync.ico keep_sync_tray.py
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -110,10 +111,10 @@ def make_icon_image():
 
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.ellipse((2, 2, 62, 62), fill="#4285F4")
+    d.ellipse((2, 2, 62, 62), fill="#1F6FEB")
     d.rectangle((18, 16, 46, 48), fill="white")
     for y in (24, 32, 40):
-        d.line((22, y, 42, y), fill="#4285F4", width=3)
+        d.line((22, y, 42, y), fill="#1F6FEB", width=3)
     return img
 
 
@@ -430,7 +431,7 @@ class StatusWindow(tk.Tk):
             self, textvariable=self.update_var, anchor="w", fg="#1a7f37", cursor="hand2"
         )
         self.update_label.grid(row=row, column=0, columnspan=2, sticky="w", **pad)
-        self.update_label.bind("<Button-1>", lambda e: webbrowser.open(core.RELEASES_URL))
+        self.update_label.bind("<Button-1>", self._open_release_page)
         row += 1
 
         tk.Label(self, text=f"Version {core.get_version()}", anchor="w", fg="gray").grid(
@@ -439,11 +440,14 @@ class StatusWindow(tk.Tk):
 
         self._refresh_status()
 
+    def _open_release_page(self, event=None) -> None:
+        if self.app.update_info:
+            webbrowser.open(self.app.update_info.url)
+
     def _refresh_status(self) -> None:
         self.status_var.set(self.app.status or "Waiting for the first sync...")
-        self.update_var.set(
-            f"Update available: {self.app.latest_version} (click to open)" if self.app.latest_version else ""
-        )
+        info = self.app.update_info
+        self.update_var.set(f"Update available: {info.version} (click to open)" if info else "")
         self.after(1000, self._refresh_status)
 
     def _sync_now(self) -> None:
@@ -452,6 +456,65 @@ class StatusWindow(tk.Tk):
     def _reconfigure(self) -> None:
         self.destroy()
         self.app._reconfigure()
+
+
+class DownloadProgressWindow(tk.Tk):
+    """Shown while an update installer downloads (see
+    TrayApp._start_download). Same "own tk.Tk(), own thread" pattern as
+    StatusWindow -- pystray's icon.run() already owns the main thread.
+    Polls app._download_percent the same way StatusWindow polls app.status:
+    the download runs on a worker thread, and a plain int read/write is
+    safe across threads under the GIL without extra locking."""
+
+    def __init__(self, app: "TrayApp"):
+        super().__init__()
+        self.app = app
+        self.title(APP_NAME)
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", lambda: None)  # no closing mid-download
+
+        pad = {"padx": 10, "pady": 6}
+        version = app.update_info.version if app.update_info else ""
+        tk.Label(self, text=f"Downloading {version}…", anchor="w").grid(
+            row=0, column=0, sticky="w", **pad
+        )
+        self.bar = ttk.Progressbar(self, length=280, maximum=100, mode="determinate")
+        self.bar.grid(row=1, column=0, padx=10, pady=(0, 10))
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self.bar["value"] = self.app._download_percent or 0
+        if not self.app._download_in_flight:
+            self.destroy()
+            return
+        self.after(150, self._refresh)
+
+
+class InstallReadyWindow(tk.Tk):
+    """Shown once the installer has finished downloading. Launching it quits
+    the tray first (see TrayApp._launch_installer) -- the installer will
+    want to overwrite the running exe."""
+
+    def __init__(self, app: "TrayApp"):
+        super().__init__()
+        self.app = app
+        self.title(APP_NAME)
+        self.resizable(False, False)
+
+        pad = {"padx": 10, "pady": 6}
+        version = app.update_info.version if app.update_info else ""
+        tk.Label(self, text=f"{version} has been downloaded.", anchor="w").grid(
+            row=0, column=0, columnspan=2, sticky="w", **pad
+        )
+        tk.Button(self, text="Later", command=self.destroy).grid(row=1, column=0, padx=10, pady=10, sticky="ew")
+        tk.Button(self, text="Launch installer", command=self._launch).grid(
+            row=1, column=1, padx=10, pady=10, sticky="ew"
+        )
+
+    def _launch(self) -> None:
+        self.destroy()
+        self.app._launch_installer()
 
 
 class TrayApp:
@@ -464,24 +527,56 @@ class TrayApp:
         self.reconfigure_requested = False
         self.status = "Starting..."
         self.status_window_open = threading.Event()
-        self.latest_version: str | None = None
+        self.update_info: "core.UpdateInfo | None" = None
         self._notified_update_version: str | None = None
+        self._download_in_flight = False
+        self._download_percent: int | None = None
+        self._downloaded_installer_path: str | None = None
+        self._download_window_open = threading.Event()
+        self._install_ready_window_open = threading.Event()
 
         self.icon = self._build_icon()
 
     def _build_icon(self):
         return self.pystray.Icon(
-            APP_NAME,
-            make_icon_image(),
-            f"{APP_NAME} — {self.status}"[:127],
-            menu=self.pystray.Menu(
-                self.pystray.MenuItem("Show status", self._show_status_window, default=True),
-                self.pystray.MenuItem("Sync now", self._sync_now),
-                self.pystray.MenuItem("Open data folder", self._open_data_folder),
-                self.pystray.MenuItem("Reconfigure…", self._reconfigure),
-                self.pystray.MenuItem("Quit", self._quit),
-            ),
+            APP_NAME, make_icon_image(), f"{APP_NAME} — {self.status}"[:127], menu=self._build_menu(),
         )
+
+    def _build_menu(self):
+        """Rebuilt (not mutated) at every state transition -- found an
+        update, started/finished/failed a download -- and reassigned to
+        self.icon.menu; pystray supports replacing the whole menu at
+        runtime. Not rebuilt on every download-progress tick: the live
+        percentage lives in DownloadProgressWindow's progress bar instead,
+        so this doesn't need to churn ~100 times over one download."""
+        items = [
+            self.pystray.MenuItem("Show status", self._show_status_window, default=True),
+            self.pystray.MenuItem("Sync now", self._sync_now),
+            self.pystray.MenuItem("Open data folder", self._open_data_folder),
+            self.pystray.MenuItem("Reconfigure…", self._reconfigure),
+        ]
+        if self.update_info is not None:
+            items.append(self._build_update_menu_item())
+        items.append(self.pystray.MenuItem("Quit", self._quit))
+        return self.pystray.Menu(*items)
+
+    def _build_update_menu_item(self):
+        info = self.update_info
+        if self._downloaded_installer_path:
+            return self.pystray.MenuItem(f"✓ {info.version} downloaded — Launch installer", self._launch_installer)
+        if self._download_in_flight:
+            return self.pystray.MenuItem(f"⬇ Downloading {info.version}…", self._noop, enabled=False)
+        if info.asset_url:
+            return self.pystray.MenuItem(f"⬆ Update available: {info.version} — Download", self._start_download)
+        # No installer for this platform (e.g. Linux) -- just point at the
+        # release page, same as the status window's link.
+        return self.pystray.MenuItem(f"⬆ Update available: {info.version}", self._open_release_page)
+
+    def _refresh_menu(self) -> None:
+        try:
+            self.icon.menu = self._build_menu()
+        except Exception:
+            log.debug("tray menu refresh failed", exc_info=True)  # not supported on every backend
 
     def _set_status(self, text: str) -> None:
         self.status = text
@@ -508,21 +603,33 @@ class TrayApp:
         once a day (see its docstring), so calling this every sync tick is
         fine. Notifies once per newly-seen version, not on every sync."""
         state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
-        latest = core.maybe_check_for_update(state_dir)
-        self.latest_version = latest
-        if latest and latest != self._notified_update_version:
-            self._notified_update_version = latest
-            log.info("update available: %s", latest)
+        info = core.maybe_check_for_update(state_dir)
+        self.update_info = info
+        if info and info.version != self._notified_update_version:
+            self._notified_update_version = info.version
+            self._downloaded_installer_path = None
+            log.info("update available: %s", info.version)
             try:
-                self.icon.notify(f"{latest} is out — {core.RELEASES_URL}", f"{APP_NAME} update available")
+                self.icon.notify(f"{info.version} is out — {info.url}", f"{APP_NAME} update available")
             except Exception:
                 log.debug("tray notify failed", exc_info=True)  # not supported on every backend
+        self._refresh_menu()
 
     # NB: pystray menu callbacks must NOT use @core.log_callback_errors --
     # pystray inspects action.__code__.co_argcount and a (*args, **kwargs)
     # wrapper fails its check with ValueError. Each body is guarded inline
     # instead. They can also run on the same thread as icon.run(), so an
     # uncaught exception here would take the whole tray down.
+    def _noop(self, icon=None, item=None) -> None:
+        pass
+
+    def _open_release_page(self, icon=None, item=None) -> None:
+        try:
+            if self.update_info:
+                webbrowser.open(self.update_info.url)
+        except Exception:
+            log.exception("could not open release page")
+
     def _sync_now(self, icon=None, item=None) -> None:
         try:
             threading.Thread(target=self._run_sync, daemon=True, name="sync-now").start()
@@ -554,6 +661,83 @@ class TrayApp:
             log.exception("status window crashed")
         finally:
             self.status_window_open.clear()
+
+    def _start_download(self, icon=None, item=None) -> None:
+        try:
+            info = self.update_info
+            if info is None or self._download_in_flight:
+                return
+            self._download_in_flight = True
+            self._download_percent = None
+            self._refresh_menu()
+            threading.Thread(target=self._download_worker, args=(info,), daemon=True, name="update-download").start()
+            if not self._download_window_open.is_set():
+                threading.Thread(
+                    target=self._run_download_progress_window, daemon=True, name="download-progress",
+                ).start()
+        except Exception:
+            log.exception("could not start update download")
+
+    def _run_download_progress_window(self) -> None:
+        self._download_window_open.set()
+        try:
+            DownloadProgressWindow(self).mainloop()
+        except Exception:
+            log.exception("download progress window crashed")
+        finally:
+            self._download_window_open.clear()
+
+    def _download_worker(self, info: "core.UpdateInfo") -> None:
+        try:
+            state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
+            dest = core.download_update_asset(info, state_dir, progress=self._on_download_progress)
+            self._on_download_finished(str(dest))
+        except Exception as e:
+            log.error("update download failed", exc_info=True)
+            self._on_download_failed(str(e))
+
+    def _on_download_progress(self, percent: int) -> None:
+        self._download_percent = percent  # polled by DownloadProgressWindow
+
+    def _on_download_finished(self, path: str) -> None:
+        self._download_in_flight = False
+        self._downloaded_installer_path = path
+        self._refresh_menu()
+        log.info("update installer downloaded: %s", path)
+        if not self._install_ready_window_open.is_set():
+            threading.Thread(
+                target=self._run_install_ready_window, daemon=True, name="install-ready",
+            ).start()
+
+    def _run_install_ready_window(self) -> None:
+        self._install_ready_window_open.set()
+        try:
+            InstallReadyWindow(self).mainloop()
+        except Exception:
+            log.exception("install-ready window crashed")
+        finally:
+            self._install_ready_window_open.clear()
+
+    def _on_download_failed(self, message: str) -> None:
+        self._download_in_flight = False
+        self._refresh_menu()
+        try:
+            self.icon.notify(f"Could not download the update: {message}", f"{APP_NAME} update failed")
+        except Exception:
+            log.debug("tray notify failed", exc_info=True)  # not supported on every backend
+
+    def _launch_installer(self, icon=None, item=None) -> None:
+        try:
+            path = self._downloaded_installer_path
+            if not path:
+                return
+            log.info("launching installer: %s", path)
+            # The installer needs to overwrite this running exe; quit first
+            # so it isn't fighting a locked file.
+            subprocess.Popen([path], close_fds=True)
+            self._quit()
+        except Exception:
+            log.exception("could not launch installer")
 
     def _reconfigure(self, icon=None, item=None) -> None:
         try:
