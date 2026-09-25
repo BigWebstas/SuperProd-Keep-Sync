@@ -75,8 +75,10 @@ python keep_sync_tray.py                   # or keep_sync_tray_qt.py
 pyinstaller --onefile --windowed --name KeepSyncTray keep_sync_tray.py
 ```
 
-First launch shows a setup window: Google email, OAuth Token (same manual step as
-above), SP Access Token → **Connect & load lists** → pick the Keep list and SP
+First launch shows a setup window: Google email, OAuth Token (an "Open sign-in
+page" button next to the field launches the embedded sign-in URL in your default
+browser — copying the `oauth_token` cookie is still manual, see above), SP
+Access Token → **Connect & load lists** → pick the Keep list and SP
 project, optionally one or more tags and a default time estimate to put on every
 task created from a Keep item → set an interval → optionally "start at login"
 (per-user, no admin) → **Save & Start

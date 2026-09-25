@@ -27,8 +27,8 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QObject, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -44,6 +45,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSystemTrayIcon,
+    QWidget,
 )
 
 import keep_sync_core as core
@@ -180,7 +182,16 @@ class SetupDialog(QDialog):
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.token_edit.setPlaceholderText("blank = reuse saved master token")
-        layout.addWidget(self.token_edit, row, 1)
+        token_row = QWidget()
+        token_row_layout = QHBoxLayout(token_row)
+        token_row_layout.setContentsMargins(0, 0, 0, 0)
+        token_row_layout.addWidget(self.token_edit)
+        open_signin_btn = QPushButton("Open sign-in page")
+        open_signin_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(core.GOOGLE_EMBEDDED_SETUP_URL))
+        )
+        token_row_layout.addWidget(open_signin_btn)
+        layout.addWidget(token_row, row, 1)
         row += 1
 
         layout.addWidget(QLabel("SP API base URL:"), row, 0)

@@ -85,6 +85,9 @@ def get_version() -> str:
 GITHUB_REPO = "BigWebstas/SuperProd-Keep-Sync"
 RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 _GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+# Google's embedded sign-in page -- where a user gets the OAuth Token setup
+# needs (see SetupWindow/SetupDialog's "Open sign-in page" button).
+GOOGLE_EMBEDDED_SETUP_URL = "https://accounts.google.com/EmbeddedSetup"
 _VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 UPDATE_CHECK_MIN_INTERVAL_HOURS = 24.0
 

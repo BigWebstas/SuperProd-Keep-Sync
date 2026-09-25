@@ -153,8 +153,14 @@ class SetupWindow(tk.Tk):
         tk.Entry(self, textvariable=self.email_var, width=36).grid(row=1, column=1, **pad)
 
         tk.Label(self, text="OAuth Token:").grid(row=2, column=0, sticky="e", **pad)
+        token_frame = tk.Frame(self)
+        token_frame.grid(row=2, column=1, sticky="w", **pad)
         self.token_var = tk.StringVar()
-        tk.Entry(self, textvariable=self.token_var, width=36, show="•").grid(row=2, column=1, **pad)
+        tk.Entry(token_frame, textvariable=self.token_var, width=26, show="•").pack(side="left")
+        tk.Button(
+            token_frame, text="Open sign-in page",
+            command=lambda: webbrowser.open(core.GOOGLE_EMBEDDED_SETUP_URL),
+        ).pack(side="left", padx=(4, 0))
 
         tk.Label(self, text="SP API base URL:").grid(row=3, column=0, sticky="e", **pad)
         self.sp_url_var = tk.StringVar(value=self.cfg.get("sp_api_base_url", core.DEFAULT_SP_API_BASE_URL))
