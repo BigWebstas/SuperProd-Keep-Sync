@@ -288,12 +288,12 @@ class LogCallbackErrorsTests(unittest.TestCase):
 
 
 class NewTaskTagTests(unittest.TestCase):
-    """cfg['sp_new_task_tag_id'] -> tasks created from Keep items get that tag."""
+    """cfg['sp_new_task_tag_ids'] -> tasks created from Keep items get those tags."""
 
     def _add_call(self, sp):
         return next(c for c in sp.calls if c[0] == "add")
 
-    def test_no_tag_configured_passes_none(self):
+    def test_no_tags_configured_passes_none(self):
         note, _ = make_list(items=[("buy milk", False)])
         sp = FakeSP()
         core.reconcile_sp(cfg(), FakeKeep([note]), sp, {})
@@ -303,15 +303,31 @@ class NewTaskTagTests(unittest.TestCase):
         note, _ = make_list(items=[("buy milk", False)])
         sp = FakeSP()
         c = cfg()
-        c["sp_new_task_tag_id"] = "tag-work"
+        c["sp_new_task_tag_ids"] = ["tag-work"]
         core.reconcile_sp(c, FakeKeep([note]), sp, {})
         self.assertEqual(self._add_call(sp)[4], ["tag-work"])
 
-    def test_blank_tag_id_is_treated_as_none(self):
+    def test_multiple_tags_are_all_applied(self):
         note, _ = make_list(items=[("buy milk", False)])
         sp = FakeSP()
         c = cfg()
-        c["sp_new_task_tag_id"] = "   "
+        c["sp_new_task_tag_ids"] = ["tag-work", "tag-home"]
+        core.reconcile_sp(c, FakeKeep([note]), sp, {})
+        self.assertEqual(self._add_call(sp)[4], ["tag-work", "tag-home"])
+
+    def test_blank_and_empty_tag_ids_are_dropped(self):
+        note, _ = make_list(items=[("buy milk", False)])
+        sp = FakeSP()
+        c = cfg()
+        c["sp_new_task_tag_ids"] = ["  ", "", "tag-work"]
+        core.reconcile_sp(c, FakeKeep([note]), sp, {})
+        self.assertEqual(self._add_call(sp)[4], ["tag-work"])
+
+    def test_all_blank_tag_ids_is_treated_as_none(self):
+        note, _ = make_list(items=[("buy milk", False)])
+        sp = FakeSP()
+        c = cfg()
+        c["sp_new_task_tag_ids"] = ["   ", ""]
         core.reconcile_sp(c, FakeKeep([note]), sp, {})
         self.assertIsNone(self._add_call(sp)[4])
 
@@ -557,6 +573,123 @@ class VersionTests(unittest.TestCase):
         v = core.get_version()
         self.assertIsInstance(v, str)
         self.assertTrue(v)  # "unknown" at worst, never ""
+
+
+class LoadConfigTagMigrationTests(unittest.TestCase):
+    """load_config: the pre-multi-select 'sp_new_task_tag_id' string folds
+    into the new 'sp_new_task_tag_ids' list, so an old config.json keeps
+    working."""
+
+    def _write(self, data):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        p = Path(d) / "config.json"
+        p.write_text(json.dumps(data), encoding="utf-8")
+        return p
+
+    def test_defaults_to_empty_tag_list(self):
+        cfg = core.load_config(self._write({"email": "a@b.com"}))
+        self.assertEqual(cfg["sp_new_task_tag_ids"], [])
+        self.assertNotIn("sp_new_task_tag_id", cfg)
+
+    def test_migrates_old_single_tag_id(self):
+        cfg = core.load_config(self._write({"email": "a@b.com", "sp_new_task_tag_id": "tag-1"}))
+        self.assertEqual(cfg["sp_new_task_tag_ids"], ["tag-1"])
+        self.assertNotIn("sp_new_task_tag_id", cfg)
+
+    def test_new_list_field_wins_if_both_are_present(self):
+        cfg = core.load_config(self._write({
+            "email": "a@b.com", "sp_new_task_tag_id": "old", "sp_new_task_tag_ids": ["new"],
+        }))
+        self.assertEqual(cfg["sp_new_task_tag_ids"], ["new"])
+
+    def test_blank_old_tag_id_does_not_migrate(self):
+        cfg = core.load_config(self._write({"email": "a@b.com", "sp_new_task_tag_id": "   "}))
+        self.assertEqual(cfg["sp_new_task_tag_ids"], [])
+
+
+class CheckForUpdateTests(unittest.TestCase):
+    """core.check_for_update: compares against the latest GitHub release tag."""
+
+    def _mock_response(self, tag_name):
+        resp = unittest.mock.Mock()
+        resp.raise_for_status = lambda: None
+        resp.json = lambda: {"tag_name": tag_name}
+        return resp
+
+    def test_newer_release_is_reported(self):
+        with unittest.mock.patch.object(core.requests, "get", return_value=self._mock_response("v2.2.13")):
+            self.assertEqual(core.check_for_update("v2.2.12"), "v2.2.13")
+
+    def test_same_version_returns_none(self):
+        with unittest.mock.patch.object(core.requests, "get", return_value=self._mock_response("v2.2.12")):
+            self.assertIsNone(core.check_for_update("v2.2.12"))
+
+    def test_older_release_returns_none(self):
+        # e.g. testing a build ahead of what's currently published.
+        with unittest.mock.patch.object(core.requests, "get", return_value=self._mock_response("v2.2.10")):
+            self.assertIsNone(core.check_for_update("v2.2.12"))
+
+    def test_dirty_dev_build_skips_the_check(self):
+        get = unittest.mock.Mock()
+        with unittest.mock.patch.object(core.requests, "get", get):
+            self.assertIsNone(core.check_for_update("v2.2.12-3-gabcdef-dirty"))
+        get.assert_not_called()
+
+    def test_network_failure_returns_none(self):
+        with unittest.mock.patch.object(core.requests, "get", side_effect=OSError("no network")):
+            self.assertIsNone(core.check_for_update("v2.2.12"))
+
+    def test_malformed_release_tag_returns_none(self):
+        with unittest.mock.patch.object(core.requests, "get", return_value=self._mock_response("not-a-version")):
+            self.assertIsNone(core.check_for_update("v2.2.12"))
+
+
+class MaybeCheckForUpdateTests(unittest.TestCase):
+    """core.maybe_check_for_update: same as check_for_update() but cached to
+    at most one real check per state_dir per min_interval_hours."""
+
+    def _tmp(self):
+        import tempfile
+        from pathlib import Path
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        return Path(d)
+
+    def test_first_call_checks_and_caches(self):
+        state_dir = self._tmp()
+        with unittest.mock.patch.object(core, "check_for_update", return_value="v2.2.13") as m:
+            result = core.maybe_check_for_update(state_dir, current_version="v2.2.12")
+        self.assertEqual(result, "v2.2.13")
+        m.assert_called_once()
+        self.assertTrue((state_dir / "update_check.json").exists())
+
+    def test_second_call_within_interval_skips_the_network_check(self):
+        state_dir = self._tmp()
+        with unittest.mock.patch.object(core, "check_for_update", return_value="v2.2.13") as m:
+            core.maybe_check_for_update(state_dir, current_version="v2.2.12")
+            result = core.maybe_check_for_update(state_dir, current_version="v2.2.12")
+        m.assert_called_once()  # only the first call hit the network
+        self.assertEqual(result, "v2.2.13")
+
+    def test_expired_cache_checks_again(self):
+        state_dir = self._tmp()
+        with unittest.mock.patch.object(core, "check_for_update", return_value="v2.2.13") as m:
+            core.maybe_check_for_update(state_dir, current_version="v2.2.12", min_interval_hours=0)
+            core.maybe_check_for_update(state_dir, current_version="v2.2.12", min_interval_hours=0)
+        self.assertEqual(m.call_count, 2)
+
+    def test_corrupt_cache_is_treated_as_a_miss(self):
+        state_dir = self._tmp()
+        (state_dir / "update_check.json").write_text("{not json", encoding="utf-8")
+        with unittest.mock.patch.object(core, "check_for_update", return_value=None) as m:
+            core.maybe_check_for_update(state_dir, current_version="v2.2.12")
+        m.assert_called_once()
 
 
 if __name__ == "__main__":

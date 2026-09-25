@@ -35,11 +35,16 @@ be running for a pass to change anything on the SP side.
 |---|---|
 | Checked / renamed items | Flow in whichever direction the change happened |
 | New items | Keep item → SP task; new top-level SP task → Keep item |
-| Tagging new tasks | Optional: pick one SP tag in setup and every task created from a Keep item gets it (SP only allows this at creation) |
+| Tagging new tasks | Optional: pick one or more SP tags in setup and every task created from a Keep item gets them (SP only allows this at creation) |
 | Default task estimate | Optional: set a minutes value in setup (`sp_default_task_minutes`) and every task created from a Keep item gets that `timeEstimate` (SP only allows this at creation); `0` = none |
 | Deletes | Never propagate — deliberately, so a background loop is never destructive |
 | Nested sub-items / subtasks | Not mapped; SP subtasks are skipped SP → Keep |
 | Conflict (both sides changed) | Keep wins |
+
+Every entry point also checks GitHub for a newer release at most once a day
+(cached in `<state_dir>/update_check.json`) and reports it — a tray notification
+plus a link in its status window, or a printed line for the CLI daemon. It never
+downloads or installs anything.
 
 `gkeepapi` is reverse-engineered and can break without notice; Google
 occasionally challenges logins (especially with 2FA). If it starts failing, mint

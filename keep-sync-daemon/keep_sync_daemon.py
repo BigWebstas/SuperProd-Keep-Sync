@@ -49,6 +49,13 @@ def main() -> int:
     core.setup_logging(core.resolve_state_dir(cfg["state_dir"]) / "keep_sync_daemon.log")
 
     result = core.sync_once(cfg)
+
+    # Throttled to once a day (see maybe_check_for_update's docstring), so a
+    # 5-minute cron schedule doesn't turn into a GitHub API poll.
+    latest = core.maybe_check_for_update(core.resolve_state_dir(cfg["state_dir"]))
+    if latest:
+        print(f"[keep-sync-daemon] update available: {latest} — {core.RELEASES_URL}")
+
     if result.ok:
         print(f"[keep-sync-daemon] {result.message}")
         return 0

@@ -27,6 +27,7 @@ import logging
 import logging.handlers
 import os
 import platform
+import re
 import signal
 import stat
 import sys
@@ -38,6 +39,7 @@ from pathlib import Path
 import gkeepapi
 import gkeepapi.node
 import gpsoauth
+import requests
 
 import sp_client
 
@@ -78,6 +80,75 @@ def get_version() -> str:
         except Exception:
             pass
     return "unknown"
+
+
+GITHUB_REPO = "BigWebstas/SuperProd-Keep-Sync"
+RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
+_GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+_VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+UPDATE_CHECK_MIN_INTERVAL_HOURS = 24.0
+
+
+def _version_tuple(v: str) -> "tuple[int, int, int] | None":
+    m = _VERSION_RE.match(v or "")
+    return tuple(int(g) for g in m.groups()) if m else None
+
+
+def check_for_update(current_version: "str | None" = None, timeout: float = 5.0) -> "str | None":
+    """The latest GitHub release tag if it's newer than `current_version`
+    (default get_version()), else None -- including when GitHub is
+    unreachable, rate-limits the request, or either version string isn't a
+    clean `vX.Y.Z` release tag (a dev/dirty git-describe build skips the
+    check rather than nagging on every commit). Never raises: this is a
+    courtesy notice, not something that should ever break a sync pass or a
+    tray startup."""
+    current_version = get_version() if current_version is None else current_version
+    current = _version_tuple(current_version)
+    if current is None:
+        return None
+    try:
+        resp = requests.get(
+            _GITHUB_LATEST_RELEASE_API, timeout=timeout,
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        resp.raise_for_status()
+        latest_tag = (resp.json() or {}).get("tag_name", "")
+    except Exception:
+        return None
+    latest = _version_tuple(latest_tag)
+    return latest_tag if (latest is not None and latest > current) else None
+
+
+def maybe_check_for_update(
+    state_dir: Path, current_version: "str | None" = None,
+    min_interval_hours: float = UPDATE_CHECK_MIN_INTERVAL_HOURS,
+) -> "str | None":
+    """check_for_update(), throttled to once per `min_interval_hours` via
+    `<state_dir>/update_check.json`. The CLI daemon and both tray apps can
+    share one state_dir and each calls this on its own schedule (a cron run,
+    a multi-minute sync loop) -- without the cache that adds up to hammering
+    GitHub's API. Returns the same as check_for_update(): a newer release
+    tag, or None. Never raises."""
+    cache_path = state_dir / "update_check.json"
+    now = datetime.now(timezone.utc).timestamp()
+    current_version = get_version() if current_version is None else current_version
+
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        cached = None
+
+    if isinstance(cached, dict) and now - float(cached.get("checked_at", 0) or 0) < min_interval_hours * 3600:
+        latest, current = cached.get("latest") or None, _version_tuple(current_version)
+        latest_t = _version_tuple(latest or "")
+        return latest if (current and latest_t and latest_t > current) else None
+
+    latest = check_for_update(current_version)
+    try:
+        atomic_write_json(cache_path, {"checked_at": now, "latest": latest or ""}, mode=0o600)
+    except OSError:
+        pass
+    return latest
 
 
 def _env_flag(name: str) -> bool:
@@ -430,9 +501,15 @@ def load_config(config_path: Path) -> dict:
     cfg.setdefault("sp_api_base_url", DEFAULT_SP_API_BASE_URL)
     cfg.setdefault("sp_access_token", "")
     cfg.setdefault("sp_project_id", "")
-    cfg.setdefault("sp_new_task_tag_id", "")
+    cfg.setdefault("sp_new_task_tag_ids", [])
     cfg.setdefault("sp_default_task_minutes", 0)
     cfg.setdefault("keep_note_title", "")
+
+    # Pre-multi-select configs carried a single "sp_new_task_tag_id" string.
+    # Fold it into the new list field so an old config.json keeps working.
+    old_tag_id = (cfg.pop("sp_new_task_tag_id", "") or "").strip()
+    if old_tag_id and not cfg["sp_new_task_tag_ids"]:
+        cfg["sp_new_task_tag_ids"] = [old_tag_id]
     return cfg
 
 
@@ -867,10 +944,9 @@ def reconcile_sp(cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", ite
     note_title = cfg.get("keep_note_title") or ""
     project_id = cfg.get("sp_project_id") or ""
     # Optional: stamp every task this sync creates from a Keep item with one
-    # SP tag (chosen in the setup dialog). SP's REST API only takes tagIds
-    # at creation, so this never touches tasks that already exist.
-    new_task_tag_id = (cfg.get("sp_new_task_tag_id") or "").strip()
-    new_task_tag_ids = [new_task_tag_id] if new_task_tag_id else None
+    # or more SP tags (chosen in the setup dialog). SP's REST API only takes
+    # tagIds at creation, so this never touches tasks that already exist.
+    new_task_tag_ids = [t.strip() for t in (cfg.get("sp_new_task_tag_ids") or []) if t and t.strip()] or None
     # Optional: give every task created from a Keep item a default time
     # estimate (SP's `timeEstimate`). Like tags, SP's REST API only accepts
     # this at creation, so existing tasks are never touched.

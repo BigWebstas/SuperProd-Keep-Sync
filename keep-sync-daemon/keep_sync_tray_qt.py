@@ -30,6 +30,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -70,7 +72,7 @@ def default_config() -> dict:
         "sp_api_base_url": core.DEFAULT_SP_API_BASE_URL,
         "sp_access_token": "",
         "sp_project_id": "",
-        "sp_new_task_tag_id": "",
+        "sp_new_task_tag_ids": [],
         "sp_default_task_minutes": 0,
         "keep_note_title": "",
     }
@@ -147,7 +149,7 @@ class SetupDialog(QDialog):
         self.cfg = dict(cfg)
         self.result_cfg: dict | None = None
         self._project_ids: list[str] = []
-        self._tag_ids: list[str] = [""]  # index 0 is the "(no tag)" choice
+        self._tag_ids: list[str] = []
 
         self.setWindowTitle(f"{APP_NAME} — Setup")
         self.setWindowIcon(make_icon())
@@ -207,11 +209,12 @@ class SetupDialog(QDialog):
         layout.addWidget(self.project_combo, row, 1)
         row += 1
 
-        layout.addWidget(QLabel("Tag new tasks with:"), row, 0)
-        self.tag_combo = QComboBox()
-        self.tag_combo.addItem("(no tag)")
-        self.tag_combo.setEnabled(False)
-        layout.addWidget(self.tag_combo, row, 1)
+        layout.addWidget(QLabel("Tag new tasks with:"), row, 0, Qt.AlignmentFlag.AlignTop)
+        self.tag_list = QListWidget()
+        self.tag_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tag_list.setMaximumHeight(90)
+        self.tag_list.setEnabled(False)
+        layout.addWidget(self.tag_list, row, 1)
         row += 1
 
         layout.addWidget(QLabel("Default task estimate (minutes, 0 = none):"), row, 0)
@@ -296,12 +299,13 @@ class SetupDialog(QDialog):
         except Exception:
             tags = []  # optional -- an old SP without GET /tags shouldn't block setup
 
-        self._tag_ids = [""] + [tid for tid, _ in tags]
-        self.tag_combo.clear()
-        self.tag_combo.addItems(["(no tag)"] + [title for _, title in tags])
-        self.tag_combo.setEnabled(True)
-        if self.cfg.get("sp_new_task_tag_id") in self._tag_ids:
-            self.tag_combo.setCurrentIndex(self._tag_ids.index(self.cfg["sp_new_task_tag_id"]))
+        self._tag_ids = [tid for tid, _ in tags]
+        self.tag_list.clear()
+        self.tag_list.addItems([title for _, title in tags])
+        self.tag_list.setEnabled(bool(tags))
+        wanted = set(self.cfg.get("sp_new_task_tag_ids") or [])
+        for i, tid in enumerate(self._tag_ids):
+            self.tag_list.item(i).setSelected(tid in wanted)
 
         self.note_combo.clear()
         self.note_combo.addItems(titles or [])
@@ -335,8 +339,7 @@ class SetupDialog(QDialog):
             self.status_label.setText("Pick a Keep list and a project first (use Connect).")
             return
 
-        tag_idx = self.tag_combo.currentIndex()
-        tag_id = self._tag_ids[tag_idx] if 0 <= tag_idx < len(self._tag_ids) else ""
+        tag_ids = [self._tag_ids[i.row()] for i in self.tag_list.selectedIndexes()]
 
         state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
         self.cfg.update(
@@ -348,7 +351,7 @@ class SetupDialog(QDialog):
             sp_api_base_url=self.sp_url_edit.text().strip() or core.DEFAULT_SP_API_BASE_URL,
             sp_access_token=self.sp_token_edit.text().strip(),
             sp_project_id=self._project_ids[project_idx],
-            sp_new_task_tag_id=tag_id,
+            sp_new_task_tag_ids=tag_ids,
             sp_default_task_minutes=self.estimate_spin.value(),
             keep_note_title=note_title,
         )
@@ -392,10 +395,16 @@ class StatusDialog(QDialog):
         reconfigure_btn.clicked.connect(self._reconfigure)
         layout.addWidget(reconfigure_btn, 2, 1)
 
+        if app.latest_version:
+            update_label = QLabel(f'Update available: <a href="{core.RELEASES_URL}">{app.latest_version}</a>')
+            update_label.setStyleSheet("color: #1a7f37;")
+            update_label.setOpenExternalLinks(True)
+            layout.addWidget(update_label, 3, 0, 1, 2)
+
         version_label = QLabel(f"Version {core.get_version()}")
         version_label.setStyleSheet("color: gray;")
         version_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(version_label, 3, 0, 1, 2)
+        layout.addWidget(version_label, 4, 0, 1, 2)
 
         app.status_changed.connect(self.status_label.setText)
 
@@ -419,6 +428,8 @@ class TrayApp(QObject):
         self.stop_event = threading.Event()
         self._scheduler_thread: threading.Thread | None = None
         self._status_dialog: StatusDialog | None = None
+        self.latest_version: str | None = None
+        self._notified_update_version: str | None = None
 
         self.tray_icon = QSystemTrayIcon(make_icon())
         self.tray_icon.setToolTip(f"{APP_NAME} — starting…")
@@ -480,6 +491,19 @@ class TrayApp(QObject):
         log.info("sync run done in %.1fs: ok=%s %s", elapsed, result.ok, result.message)
         if not result.ok:
             self.notify.emit(f"{APP_NAME} sync failed", result.message)
+        self._check_for_update()
+
+    def _check_for_update(self) -> None:
+        """Cheap on most calls: maybe_check_for_update() only hits GitHub
+        once a day (see its docstring), so calling this every sync tick is
+        fine. Notifies once per newly-seen version, not on every sync."""
+        state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
+        latest = core.maybe_check_for_update(state_dir)
+        self.latest_version = latest
+        if latest and latest != self._notified_update_version:
+            self._notified_update_version = latest
+            log.info("update available: %s", latest)
+            self.notify.emit(f"{APP_NAME} update available", f"{latest} is out — {core.RELEASES_URL}")
 
     @core.log_callback_errors("sync now")
     def sync_now(self) -> None:

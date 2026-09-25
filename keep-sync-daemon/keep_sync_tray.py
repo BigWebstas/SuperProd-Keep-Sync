@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -57,7 +58,7 @@ def default_config() -> dict:
         "sp_api_base_url": core.DEFAULT_SP_API_BASE_URL,
         "sp_access_token": "",
         "sp_project_id": "",
-        "sp_new_task_tag_id": "",
+        "sp_new_task_tag_ids": [],
         "sp_default_task_minutes": 0,
         "keep_note_title": "",
     }
@@ -126,7 +127,7 @@ class SetupWindow(tk.Tk):
         self.cfg = dict(cfg)
         self.result: dict | None = None
         self._project_ids: list[str] = []
-        self._tag_ids: list[str] = [""]  # index 0 is the "(no tag)" choice
+        self._tag_ids: list[str] = []
 
         self.title(f"{APP_NAME} — Setup")
         self.resizable(False, False)
@@ -174,10 +175,17 @@ class SetupWindow(tk.Tk):
         self.project_combo = ttk.Combobox(self, textvariable=self.project_var, width=34, state="disabled")
         self.project_combo.grid(row=7, column=1, **pad)
 
-        tk.Label(self, text="Tag new tasks with:").grid(row=8, column=0, sticky="e", **pad)
-        self.tag_var = tk.StringVar()
-        self.tag_combo = ttk.Combobox(self, textvariable=self.tag_var, width=34, state="disabled")
-        self.tag_combo.grid(row=8, column=1, **pad)
+        tk.Label(self, text="Tag new tasks with:").grid(row=8, column=0, sticky="ne", **pad)
+        tag_frame = tk.Frame(self)
+        tag_frame.grid(row=8, column=1, sticky="w", **pad)
+        self.tag_list = tk.Listbox(
+            tag_frame, height=4, width=32, selectmode=tk.EXTENDED,
+            exportselection=False, state="disabled",
+        )
+        tag_scroll = tk.Scrollbar(tag_frame, orient="vertical", command=self.tag_list.yview)
+        self.tag_list.config(yscrollcommand=tag_scroll.set)
+        self.tag_list.pack(side="left", fill="y")
+        tag_scroll.pack(side="left", fill="y")
 
         tk.Label(self, text="Default task estimate (minutes, 0 = none):").grid(row=9, column=0, sticky="e", **pad)
         self.estimate_var = tk.StringVar(value=str(self.cfg.get("sp_default_task_minutes", 0) or 0))
@@ -270,13 +278,17 @@ class SetupWindow(tk.Tk):
             tags = core.list_sp_tags(sp_url, sp_token)
         except Exception:
             tags = []  # optional -- an old SP without GET /tags shouldn't block setup
-        self._tag_ids = [""] + [tid for tid, _ in tags]
-        tag_titles = ["(no tag)"] + [title for _, title in tags]
-        self.tag_combo.config(values=tag_titles, state="readonly")
-        if self.cfg.get("sp_new_task_tag_id") in self._tag_ids:
-            self.tag_var.set(tag_titles[self._tag_ids.index(self.cfg["sp_new_task_tag_id"])])
-        else:
-            self.tag_var.set(tag_titles[0])
+        self._tag_ids = [tid for tid, _ in tags]
+        self.tag_list.config(state="normal")
+        self.tag_list.delete(0, tk.END)
+        for _, title in tags:
+            self.tag_list.insert(tk.END, title)
+        wanted = set(self.cfg.get("sp_new_task_tag_ids") or [])
+        for i, tid in enumerate(self._tag_ids):
+            if tid in wanted:
+                self.tag_list.selection_set(i)
+        if not tags:
+            self.tag_list.config(state="disabled")
 
         self.connect_btn.config(state="normal")
         if not titles:
@@ -321,13 +333,7 @@ class SetupWindow(tk.Tk):
             self.status_var.set("Pick a Keep list and a project first (use Connect).")
             return
 
-        tag_titles = list(self.tag_combo.cget("values"))
-        tag_title = self.tag_var.get().strip()
-        tag_id = (
-            self._tag_ids[tag_titles.index(tag_title)]
-            if tag_title in tag_titles and len(self._tag_ids) == len(tag_titles)
-            else ""
-        )
+        tag_ids = [self._tag_ids[i] for i in self.tag_list.curselection() if i < len(self._tag_ids)]
 
         state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
         self.cfg.update(
@@ -339,7 +345,7 @@ class SetupWindow(tk.Tk):
             sp_api_base_url=self.sp_url_var.get().strip() or core.DEFAULT_SP_API_BASE_URL,
             sp_access_token=self.sp_token_var.get().strip(),
             sp_project_id=project_id,
-            sp_new_task_tag_id=tag_id,
+            sp_new_task_tag_ids=tag_ids,
             sp_default_task_minutes=estimate_minutes,
             keep_note_title=note_title,
         )
@@ -391,14 +397,24 @@ class StatusWindow(tk.Tk):
             row=2, column=1, padx=10, pady=10, sticky="ew"
         )
 
+        self.update_var = tk.StringVar()
+        self.update_label = tk.Label(
+            self, textvariable=self.update_var, anchor="w", fg="#1a7f37", cursor="hand2"
+        )
+        self.update_label.grid(row=3, column=0, columnspan=2, sticky="w", **pad)
+        self.update_label.bind("<Button-1>", lambda e: webbrowser.open(core.RELEASES_URL))
+
         tk.Label(self, text=f"Version {core.get_version()}", anchor="w", fg="gray").grid(
-            row=3, column=0, columnspan=2, sticky="w", **pad
+            row=4, column=0, columnspan=2, sticky="w", **pad
         )
 
         self._refresh_status()
 
     def _refresh_status(self) -> None:
         self.status_var.set(self.app.status or "Waiting for the first sync...")
+        self.update_var.set(
+            f"Update available: {self.app.latest_version} (click to open)" if self.app.latest_version else ""
+        )
         self.after(1000, self._refresh_status)
 
     def _sync_now(self) -> None:
@@ -419,6 +435,8 @@ class TrayApp:
         self.reconfigure_requested = False
         self.status = "Starting..."
         self.status_window_open = threading.Event()
+        self.latest_version: str | None = None
+        self._notified_update_version: str | None = None
 
         self.icon = self._build_icon()
 
@@ -452,6 +470,22 @@ class TrayApp:
         if not result.ok:
             try:
                 self.icon.notify(result.message, f"{APP_NAME} sync failed")
+            except Exception:
+                log.debug("tray notify failed", exc_info=True)  # not supported on every backend
+        self._check_for_update()
+
+    def _check_for_update(self) -> None:
+        """Cheap on most calls: maybe_check_for_update() only hits GitHub
+        once a day (see its docstring), so calling this every sync tick is
+        fine. Notifies once per newly-seen version, not on every sync."""
+        state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
+        latest = core.maybe_check_for_update(state_dir)
+        self.latest_version = latest
+        if latest and latest != self._notified_update_version:
+            self._notified_update_version = latest
+            log.info("update available: %s", latest)
+            try:
+                self.icon.notify(f"{latest} is out — {core.RELEASES_URL}", f"{APP_NAME} update available")
             except Exception:
                 log.debug("tray notify failed", exc_info=True)  # not supported on every backend
 

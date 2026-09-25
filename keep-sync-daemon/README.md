@@ -28,7 +28,8 @@ cp config.example.json config.json
 Edit `config.json`: `email`, `sp_access_token`, `sp_project_id` (from
 `GET http://127.0.0.1:3876/projects`), and `keep_note_title` (the exact Keep
 checklist title). Optional: `sp_default_task_minutes` gives every task created
-from a Keep item that time estimate in minutes (`0` = none).
+from a Keep item that time estimate in minutes (`0` = none); `sp_new_task_tag_ids`
+is a list of SP tag ids (from `GET /tags`) to put on those same tasks.
 
 ## 3. Master token (one-time, the fiddly part)
 
@@ -56,7 +57,8 @@ challenges.
 python3 keep_sync_daemon.py --config config.json
 ```
 
-Prints how many tasks/items it created and updated on each side.
+Prints how many tasks/items it created and updated on each side, plus a note if
+a newer release is available on GitHub (checked at most once a day).
 
 ## Tray apps (no scheduler needed)
 
@@ -75,12 +77,15 @@ pyinstaller --onefile --windowed --name KeepSyncTray keep_sync_tray.py
 
 First launch shows a setup window: Google email, OAuth Token (same manual step as
 above), SP Access Token → **Connect & load lists** → pick the Keep list and SP
-project, optionally a tag and a default time estimate to put on every task
-created from a Keep item → set an interval → optionally "start at login"
+project, optionally one or more tags and a default time estimate to put on every
+task created from a Keep item → set an interval → optionally "start at login"
 (per-user, no admin) → **Save & Start
 Syncing**. The tray menu has Show status, Sync now, Open data folder, Reconfigure,
 and Quit. `config.json` and the autostart entry are written next to the binary,
 so keep it in a stable folder.
+
+The status window also shows a link when a newer release is available (checked at
+most once a day); the tray fires a one-time notification the moment it notices.
 
 ## Logs
 
