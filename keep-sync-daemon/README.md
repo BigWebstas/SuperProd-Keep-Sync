@@ -93,16 +93,20 @@ project, optionally one or more tags and a default time estimate to put on every
 task created from a Keep item → set an interval → optionally "start at login"
 (per-user, no admin) → **Save & Start
 Syncing**. The tray menu has Show status, Sync now, Open data folder, Reconfigure,
-and Quit. `config.json` and the autostart entry are written next to the binary,
-so keep it in a stable folder.
+and **Check for update**, Open data folder, Reconfigure, and Quit. `config.json`
+and the autostart entry are written next to the binary, so keep it in a stable
+folder.
 
 The status window also shows a link when a newer release is available (checked at
-most once a day); the tray fires a one-time notification the moment it notices. On
-Windows the tray menu also grows an **Update available: vX.Y.Z — Download** entry;
-clicking it pops a progress window, then (once downloaded) a **Launch installer**
-window — launching quits the tray first so the installer isn't fighting a locked
-exe. On Linux, where there's no installer to launch yet, that menu entry just opens
-the release page, same as the status window's link.
+most once a day); the tray fires a one-time notification the moment it notices.
+**Check for update** in the menu bypasses that once-a-day cache for an on-demand
+check, and always tells you the result — found or already up to date — instead of
+only notifying once. On Windows the tray menu also grows an
+**Update available: vX.Y.Z — Download** entry once one's found; clicking it pops
+a progress window, then (once downloaded) a **Launch installer** window —
+launching quits the tray first so the installer isn't fighting a locked exe. On
+Linux, where there's no installer to launch yet, that menu entry just opens the
+release page, same as the status window's link.
 
 ## Logs
 

@@ -528,6 +528,7 @@ class TrayApp(QObject):
         self._menu = QMenu()
         self._menu.addAction("Show status", self.show_status_window)
         self._menu.addAction("Sync now", self.sync_now)
+        self._menu.addAction("Check for update", self.check_for_update_now)
         self._menu.addAction("Open data folder", self.open_data_folder)
         self._menu.addAction("Reconfigure…", self.reconfigure)
         self._menu.addSeparator()
@@ -590,19 +591,37 @@ class TrayApp(QObject):
             self.notify.emit(f"{APP_NAME} sync failed", result.message)
         self._check_for_update()
 
-    def _check_for_update(self) -> None:
+    def _check_for_update(self, force: bool = False, manual: bool = False) -> None:
         """Cheap on most calls: maybe_check_for_update() only hits GitHub
         once a day (see its docstring), so calling this every sync tick is
-        fine. Notifies once per newly-seen version, not on every sync."""
+        fine. `force` bypasses that cache for an on-demand check (the
+        "Check for update" menu action). Automatic calls (force=False)
+        notify once per newly-seen version; `manual` calls always notify,
+        found or not -- someone who clicked "Check for update" wants to
+        know either way, not just be told once and never again."""
         state_dir = core.resolve_state_dir(self.cfg.get("state_dir", core.DEFAULT_STATE_DIR))
-        info = core.maybe_check_for_update(state_dir)
+        info = (
+            core.maybe_check_for_update(state_dir, min_interval_hours=0) if force
+            else core.maybe_check_for_update(state_dir)
+        )
         self.update_info = info
-        if info and info.version != self._notified_update_version:
+        is_new = bool(info) and info.version != self._notified_update_version
+        if is_new:
             self._notified_update_version = info.version
             self._downloaded_installer_path = None
+        if info and (is_new or manual):
             log.info("update available: %s", info.version)
             self.notify.emit(f"{APP_NAME} update available", f"{info.version} is out — {info.url}")
+        elif manual and not info:
+            self.notify.emit(APP_NAME, f"You're on the latest version ({core.get_version()}).")
         self._refresh_update_action()
+
+    @core.log_callback_errors("check for update now")
+    def check_for_update_now(self) -> None:
+        threading.Thread(
+            target=self._check_for_update, kwargs={"force": True, "manual": True},
+            daemon=True, name="check-for-update",
+        ).start()
 
     def _refresh_update_action(self) -> None:
         """Drives self._update_action's text/enabled state and click target
