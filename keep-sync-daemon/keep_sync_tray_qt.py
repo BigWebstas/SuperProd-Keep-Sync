@@ -478,7 +478,11 @@ class StatusDialog(QDialog):
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(2000)  # cap growth for a long-open window
-        self.log_view.setStyleSheet("font-family: monospace; font-size: 10pt;")
+        self.log_view.setStyleSheet("font-family: monospace; font-size: 9pt;")
+        # No wrap -- long lines scroll horizontally instead of wrapping, which
+        # is what actually makes QPlainTextEdit's (always-present) horizontal
+        # scrollbar do anything.
+        self.log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.log_view.setMinimumSize(420, 160)
         layout.addWidget(self.log_view, row, 0, 1, 2)
         # The dialog is resizable by default; this just makes sure extra

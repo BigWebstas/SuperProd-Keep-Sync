@@ -474,11 +474,17 @@ class StatusWindow(tk.Tk):
         row += 1
         log_frame = tk.Frame(self)
         log_frame.grid(row=row, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="nsew")
-        self.log_text = tk.Text(log_frame, height=12, width=56, state="disabled", wrap="none")
-        log_scroll = tk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        self.log_text.config(yscrollcommand=log_scroll.set)
+        self.log_text = tk.Text(
+            log_frame, height=12, width=56, state="disabled", wrap="none", font=("Courier New", 9),
+        )
+        log_vscroll = tk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        log_hscroll = tk.Scrollbar(log_frame, orient="horizontal", command=self.log_text.xview)
+        self.log_text.config(yscrollcommand=log_vscroll.set, xscrollcommand=log_hscroll.set)
+        # Pack order matters: the scrollbars claim their edges first, the
+        # text widget fills whatever's left.
+        log_hscroll.pack(side="bottom", fill="x")
+        log_vscroll.pack(side="right", fill="y")
         self.log_text.pack(side="left", fill="both", expand=True)
-        log_scroll.pack(side="left", fill="y")
         # The window is resizable (see resizable() above); this is what
         # actually sends the extra space to the log row instead of leaving
         # it as blank padding elsewhere when the window is enlarged.
