@@ -81,6 +81,9 @@ def default_config() -> dict:
         "sp_new_task_tag_titles": [],
         "sp_default_task_minutes": 0,
         "keep_note_title": "",
+        "keep_sort_alphabetically": False,
+        "ai_merchant_rename_enabled": False,
+        "anthropic_api_key": "",
     }
 
 
@@ -253,6 +256,25 @@ class SetupDialog(QDialog):
         layout.addWidget(self.startup_check, row, 0, 1, 2)
         row += 1
 
+        self.sort_check = QCheckBox("Keep the Keep checklist sorted alphabetically")
+        self.sort_check.setChecked(bool(self.cfg.get("keep_sort_alphabetically", False)))
+        layout.addWidget(self.sort_check, row, 0, 1, 2)
+        row += 1
+
+        self.ai_rename_check = QCheckBox(
+            "Use AI to prefix new items with the merchant name (e.g. \"Walmart - Toilet tablets\")"
+        )
+        self.ai_rename_check.setChecked(bool(self.cfg.get("ai_merchant_rename_enabled", False)))
+        layout.addWidget(self.ai_rename_check, row, 0, 1, 2)
+        row += 1
+
+        layout.addWidget(QLabel("Anthropic API Key:"), row, 0)
+        self.anthropic_key_edit = QLineEdit(self.cfg.get("anthropic_api_key", ""))
+        self.anthropic_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.anthropic_key_edit.setPlaceholderText("required for the AI rename above; console.anthropic.com")
+        layout.addWidget(self.anthropic_key_edit, row, 1)
+        row += 1
+
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #c0392b;")
         self.status_label.setWordWrap(True)
@@ -373,6 +395,9 @@ class SetupDialog(QDialog):
             sp_new_task_tag_titles=tag_titles,
             sp_default_task_minutes=self.estimate_spin.value(),
             keep_note_title=note_title,
+            keep_sort_alphabetically=self.sort_check.isChecked(),
+            ai_merchant_rename_enabled=self.ai_rename_check.isChecked(),
+            anthropic_api_key=self.anthropic_key_edit.text().strip(),
         )
         core.save_config(CONFIG_PATH, self.cfg)
 

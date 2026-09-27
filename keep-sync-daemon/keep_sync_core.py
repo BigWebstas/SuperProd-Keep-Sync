@@ -583,6 +583,10 @@ def load_config(config_path: Path) -> dict:
     cfg.setdefault("sp_new_task_tag_titles", [])
     cfg.setdefault("sp_default_task_minutes", 0)
     cfg.setdefault("keep_note_title", "")
+    cfg.setdefault("keep_sort_alphabetically", False)
+    cfg.setdefault("ai_merchant_rename_enabled", False)
+    cfg.setdefault("anthropic_api_key", "")
+    cfg.setdefault("ai_merchant_rename_model", "")
 
     # Pre-multi-select configs carried a single "sp_new_task_tag_id" string.
     # Fold it into the new list field so an old config.json keeps working.
@@ -601,6 +605,77 @@ def _default_task_estimate_ms(cfg: dict) -> "int | None":
     except (TypeError, ValueError):
         return None
     return minutes * 60_000 if minutes > 0 else None
+
+
+# --- AI merchant-prefix rename ------------------------------------------------
+#
+# Optional: a Keep item dictated as free text ("from walmart add toilet
+# tablets") gets rewritten to "Walmart - Toilet tablets" before the SP task
+# is created from it. One Claude API call per genuinely new item -- never
+# retried once it's been looked at (see load_ai_rename_record), whether or
+# not a merchant was found, so this is a one-shot cost, not a per-pass one.
+
+ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+DEFAULT_AI_RENAME_MODEL = "claude-haiku-4-5-20251001"
+_AI_RENAME_SYSTEM_PROMPT = (
+    "You clean up shopping-list entries dictated as free text. If the text names a "
+    "specific merchant, store, or brand, rewrite it as \"Merchant - Item\" (merchant "
+    "in title case, item in sentence case, filler words like 'from'/'add'/'buy' "
+    "removed). Reply with ONLY the rewritten text, nothing else. If no merchant is "
+    "named, reply with exactly NONE."
+)
+# Already looks hand-formatted as "Merchant - Item" (ours or the user's own) --
+# skip it without spending an API call either way.
+_ALREADY_PREFIXED_RE = re.compile(r"\S.*\s-\s\S")
+
+
+def get_anthropic_api_key(cfg: dict) -> str:
+    """Config's `anthropic_api_key`, falling back to ANTHROPIC_API_KEY --
+    same env-var-first precedent as the Keep master token."""
+    return (cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+
+
+def looks_already_prefixed(text: str) -> bool:
+    return bool(_ALREADY_PREFIXED_RE.search(text or ""))
+
+
+def ai_merchant_prefix(
+    text: str, api_key: str, model: "str | None" = None, timeout: float = 15.0,
+) -> "str | None":
+    """Asks Claude to rewrite `text` as "Merchant - Item" if it names a
+    merchant, else None (left as-is). Never raises: a bad key, network
+    hiccup, or malformed response just means this item doesn't get renamed
+    this pass -- reconcile_sp still creates the SP task with the original
+    text, and the miss still gets recorded so it isn't retried forever."""
+    log = logging.getLogger(LOGGER_NAME)
+    if not text.strip() or not api_key:
+        return None
+    try:
+        resp = requests.post(
+            ANTHROPIC_MESSAGES_URL,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model or DEFAULT_AI_RENAME_MODEL,
+                "max_tokens": 60,
+                "system": _AI_RENAME_SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": text}],
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        blocks = (resp.json() or {}).get("content") or []
+        reply = (blocks[0].get("text") if blocks else "") or ""
+        reply = reply.strip()
+    except Exception:
+        log.warning("AI merchant-rename call failed", exc_info=True)
+        return None
+    if not reply or reply.upper() == "NONE":
+        return None
+    return reply
 
 
 def atomic_write_json(path: Path, data: dict, mode: int = 0o600, indent: "int | None" = 2) -> None:
@@ -783,6 +858,25 @@ def load_item_map(item_map_path: Path) -> dict:
 
 def save_item_map(item_map_path: Path, item_map: dict) -> None:
     atomic_write_json(item_map_path, item_map, mode=0o600, indent=None)
+
+
+def load_ai_rename_record(path: Path) -> dict:
+    """Which Keep item ids the AI merchant-prefix step has already looked
+    at, keyed by item id -> {"result": "renamed"|"no_merchant", "at": iso}.
+    Recording a miss (no merchant found) too is what makes this a one-shot
+    cost per item rather than an API call every pass forever."""
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_ai_rename_record(path: Path, record: dict) -> None:
+    atomic_write_json(path, record, mode=0o600, indent=None)
 
 
 def find_keep_list(keep: "gkeepapi.Keep", title: str, include_archived: bool):
@@ -1006,7 +1100,10 @@ class ReconcileResult:
         return self.created_sp + self.updated_sp + self.created_keep + self.updated_keep
 
 
-def reconcile_sp(cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", item_map: dict) -> ReconcileResult:
+def reconcile_sp(
+    cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", item_map: dict,
+    ai_rename_record: "dict | None" = None,
+) -> ReconcileResult:
     """Reconciles one Keep checklist against one SP project through the
     Local REST API. Mutates `keep`'s in-memory graph (caller pushes with
     keep.sync() if keep_dirty) and `item_map` in place (caller persists).
@@ -1018,7 +1115,12 @@ def reconcile_sp(cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", ite
       - top-level SP task not mapped   -> create the Keep item
       - either side deleted            -> leave the counterpart alone
     On a text/checked conflict Keep wins (its value is applied to SP first,
-    then the refreshed task no longer looks changed on the way back)."""
+    then the refreshed task no longer looks changed on the way back).
+
+    `ai_rename_record` (mutated in place like item_map, caller persists) is
+    only consulted/used when both it and cfg['ai_merchant_rename_enabled']
+    are truthy -- pass None to skip the feature entirely (e.g. in tests that
+    don't care about it)."""
     log = logging.getLogger(LOGGER_NAME)
     note_title = cfg.get("keep_note_title") or ""
     project_id = cfg.get("sp_project_id") or ""
@@ -1030,6 +1132,12 @@ def reconcile_sp(cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", ite
     # estimate (SP's `timeEstimate`). Like tags, SP's REST API only accepts
     # this at creation, so existing tasks are never touched.
     new_task_estimate_ms = _default_task_estimate_ms(cfg)
+    # Optional: rewrite a freely-dictated new item ("from walmart add toilet
+    # tablets") to "Merchant - Item" before the SP task is created from it.
+    # One API call per item, ever -- see ai_rename_record's docstring.
+    ai_rename_enabled = bool(cfg.get("ai_merchant_rename_enabled")) and ai_rename_record is not None
+    ai_rename_api_key = get_anthropic_api_key(cfg) if ai_rename_enabled else ""
+    ai_rename_model = (cfg.get("ai_merchant_rename_model") or "").strip() or None
 
     note = find_keep_list(keep, note_title, cfg.get("include_archived", False))
     if note is None:
@@ -1078,11 +1186,27 @@ def reconcile_sp(cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", ite
             entry["text"] = item.text
             entry["checked"] = bool(item.checked)
         else:
+            title = item.text
+            if (
+                ai_rename_enabled and ai_rename_api_key
+                and item.id not in ai_rename_record
+                and not looks_already_prefixed(title)
+            ):
+                renamed = ai_merchant_prefix(title, ai_rename_api_key, ai_rename_model)
+                ai_rename_record[item.id] = {
+                    "result": "renamed" if renamed else "no_merchant",
+                    "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                }
+                if renamed:
+                    log.info("AI merchant-rename: %r -> %r", title, renamed)
+                    title = renamed
+                    item.text = renamed  # keep both sides showing the same title
+                    res.keep_dirty = True
             task_id = sp.add_task(
-                item.text, project_id, bool(item.checked),
+                title, project_id, bool(item.checked),
                 tag_ids=new_task_tag_ids, time_estimate_ms=new_task_estimate_ms,
             )
-            note_map[item.id] = {"taskId": task_id, "text": item.text, "checked": bool(item.checked)}
+            note_map[item.id] = {"taskId": task_id, "text": title, "checked": bool(item.checked)}
             res.created_sp += 1
 
     # 2. SP -> Keep: mapped task changed independently of Keep.
@@ -1123,6 +1247,17 @@ def reconcile_sp(cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", ite
         res.new_keep_item_ids.append(new_item.id)
         res.created_keep += 1
         res.keep_dirty = True
+
+    # Optional: keep the Keep checklist alphabetized. Checked first against
+    # the current order so an already-sorted list doesn't get touched (and
+    # pushed to Google) on a pass where nothing changed -- sort_items()
+    # unconditionally reassigns every item's sort value, which would
+    # otherwise mean a Keep write on every single pass forever.
+    if cfg.get("keep_sort_alphabetically"):
+        current_order = [i.text for i in note.items]
+        if current_order != sorted(current_order, key=str.casefold):
+            note.sort_items(key=lambda i: i.text.casefold())
+            res.keep_dirty = True
 
     log.info(
         "reconciled %r: SP +%d/~%d, Keep +%d/~%d",
@@ -1219,6 +1354,7 @@ def _sync_once(cfg: dict) -> SyncResult:
 
     google_cache_path = state_dir / "google_sync_cache.json"
     item_map_path = state_dir / "item_map.json"
+    ai_rename_path = state_dir / "ai_renamed.json"
     debug_path = state_dir / "last_sync.json"
 
     for field in ("sp_access_token", "sp_project_id", "keep_note_title"):
@@ -1239,6 +1375,7 @@ def _sync_once(cfg: dict) -> SyncResult:
     keep = gkeepapi.Keep()
     cached_state = load_google_state_cache(google_cache_path)
     item_map = load_item_map(item_map_path)
+    ai_rename_record = load_ai_rename_record(ai_rename_path)
 
     try:
         if cached_state:
@@ -1264,7 +1401,7 @@ def _sync_once(cfg: dict) -> SyncResult:
     _clear_sp_keep_alert(sp, cfg.get("sp_project_id", ""))
 
     try:
-        result = reconcile_sp(cfg, keep, sp, item_map)
+        result = reconcile_sp(cfg, keep, sp, item_map, ai_rename_record)
     except LookupError as e:
         log.warning("reconcile aborted: %s", e)
         return SyncResult(False, str(e))
@@ -1309,6 +1446,14 @@ def _sync_once(cfg: dict) -> SyncResult:
     except OSError as e:
         log.error("failed to write %s", item_map_path, exc_info=True)
         return SyncResult(False, f"failed to write {item_map_path}: {e}")
+
+    # Best-effort, unlike item_map: this is a cost-tracking record ("did we
+    # already ask the AI about this item"), not something either side's
+    # state depends on, so a write failure here shouldn't fail the pass.
+    try:
+        save_ai_rename_record(ai_rename_path, ai_rename_record)
+    except OSError:
+        log.warning("failed to write %s", ai_rename_path, exc_info=True)
 
     if push_error is not None:
         return SyncResult(

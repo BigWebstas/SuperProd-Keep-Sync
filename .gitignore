@@ -3,6 +3,7 @@ keep-sync-daemon/config.json
 keep-sync-daemon/__pycache__/
 *.pyc
 *.log
+*.log.*
 *.fault.log
 keep-sync-daemon/_keep_sync_version.py
 

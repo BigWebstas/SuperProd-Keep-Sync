@@ -29,7 +29,13 @@ Edit `config.json`: `email`, `sp_access_token`, `sp_project_id` (from
 `GET http://127.0.0.1:3876/projects`), and `keep_note_title` (the exact Keep
 checklist title). Optional: `sp_default_task_minutes` gives every task created
 from a Keep item that time estimate in minutes (`0` = none); `sp_new_task_tag_ids`
-is a list of SP tag ids (from `GET /tags`) to put on those same tasks.
+is a list of SP tag ids (from `GET /tags`) to put on those same tasks;
+`keep_sort_alphabetically` re-alphabetizes the Keep checklist after every pass
+(Keep-side only — SP has no reorder API); `ai_merchant_rename_enabled` +
+`anthropic_api_key` (or the `ANTHROPIC_API_KEY` env var) rewrites a freely-dictated
+new item like "from walmart add toilet tablets" to "Walmart - Toilet tablets"
+via Claude before creating its SP task — one API call per item, ever, tracked in
+`<state_dir>/ai_renamed.json`.
 
 ## 3. Master token (one-time, the fiddly part)
 
@@ -91,10 +97,11 @@ browser — copying the `oauth_token` cookie is still manual, see above), SP
 Access Token → **Connect & load lists** → pick the Keep list and SP
 project, optionally one or more tags and a default time estimate to put on every
 task created from a Keep item → set an interval → optionally "start at login"
-(per-user, no admin) → **Save & Start
-Syncing**. The tray menu has Show status, Sync now, Open data folder, Reconfigure,
-and **Check for update**, Open data folder, Reconfigure, and Quit. `config.json`
-and the autostart entry are written next to the binary, so keep it in a stable
+(per-user, no admin), sort the Keep checklist alphabetically, and/or AI-rename
+new items with a merchant prefix (needs an Anthropic API key) → **Save & Start
+Syncing**. The tray menu has Show status, Sync now, Check for update, Open data
+folder, Reconfigure, and Quit. `config.json` and the autostart entry are
+written next to the binary, so keep it in a stable
 folder.
 
 The status window also shows a link when a newer release is available (checked at

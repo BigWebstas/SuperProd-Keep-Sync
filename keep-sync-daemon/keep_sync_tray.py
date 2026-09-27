@@ -64,6 +64,9 @@ def default_config() -> dict:
         "sp_new_task_tag_titles": [],
         "sp_default_task_minutes": 0,
         "keep_note_title": "",
+        "keep_sort_alphabetically": False,
+        "ai_merchant_rename_enabled": False,
+        "anthropic_api_key": "",
     }
 
 
@@ -211,12 +214,27 @@ class SetupWindow(tk.Tk):
             self, text="Start automatically when Windows starts", variable=self.startup_var
         ).grid(row=11, column=0, columnspan=2, sticky="w", **pad)
 
+        self.sort_var = tk.BooleanVar(value=self.cfg.get("keep_sort_alphabetically", False))
+        tk.Checkbutton(
+            self, text="Keep the Keep checklist sorted alphabetically", variable=self.sort_var
+        ).grid(row=12, column=0, columnspan=2, sticky="w", **pad)
+
+        self.ai_rename_var = tk.BooleanVar(value=self.cfg.get("ai_merchant_rename_enabled", False))
+        tk.Checkbutton(
+            self, text='Use AI to prefix new items with the merchant name (e.g. "Walmart - Toilet tablets")',
+            variable=self.ai_rename_var,
+        ).grid(row=13, column=0, columnspan=2, sticky="w", **pad)
+
+        tk.Label(self, text="Anthropic API Key:").grid(row=14, column=0, sticky="e", **pad)
+        self.anthropic_key_var = tk.StringVar(value=self.cfg.get("anthropic_api_key", ""))
+        tk.Entry(self, textvariable=self.anthropic_key_var, width=36, show="•").grid(row=14, column=1, **pad)
+
         self.status_var = tk.StringVar(value="")
         self.status_label = tk.Label(self, textvariable=self.status_var, fg="red", wraplength=380, justify="left")
-        self.status_label.grid(row=12, column=0, columnspan=2, **pad)
+        self.status_label.grid(row=15, column=0, columnspan=2, **pad)
 
         self.submit_btn = tk.Button(self, text="Save & Start Syncing", command=self._submit, state="disabled")
-        self.submit_btn.grid(row=13, column=0, columnspan=2, pady=10)
+        self.submit_btn.grid(row=16, column=0, columnspan=2, pady=10)
 
     def _cancel(self) -> None:
         self.result = None
@@ -361,6 +379,9 @@ class SetupWindow(tk.Tk):
             sp_new_task_tag_titles=tag_titles,
             sp_default_task_minutes=estimate_minutes,
             keep_note_title=note_title,
+            keep_sort_alphabetically=self.sort_var.get(),
+            ai_merchant_rename_enabled=self.ai_rename_var.get(),
+            anthropic_api_key=self.anthropic_key_var.get().strip(),
         )
         core.save_config(CONFIG_PATH, self.cfg)
 

@@ -904,5 +904,228 @@ class DownloadUpdateAssetTests(unittest.TestCase):
         self.assertEqual(seen, [])
 
 
+class KeepAlphabeticalSortTests(unittest.TestCase):
+    """cfg['keep_sort_alphabetically'] -> reconcile_sp alphabetizes the Keep
+    checklist in place, but only when it isn't already in order.
+
+    gkeepapi.node.List.items is sorted by each item's numeric `.sort` field,
+    not insertion order -- and List.add() with no explicit `sort=` assigns a
+    random one, so two items' displayed order is otherwise a coin flip
+    between test runs. These pass an explicit descending `sort=` per item
+    (matching sorted_items()'s "highest sort first" convention) to pin down
+    the *initial* order the test means to start from."""
+
+    @staticmethod
+    def _ordered_list(*texts, title="My List"):
+        note = gkeepapi.node.List()
+        note.title = title
+        n = len(texts)
+        for i, text in enumerate(texts):
+            note.add(text, False, sort=(n - i) * 100)
+        return note
+
+    def test_disabled_by_default_leaves_order_alone(self):
+        note = self._ordered_list("banana", "apple")
+        core.reconcile_sp(cfg(), FakeKeep([note]), FakeSP(), {})
+        self.assertEqual([i.text for i in note.items], ["banana", "apple"])
+
+    def test_enabled_sorts_out_of_order_list(self):
+        note = self._ordered_list("banana", "apple", "cherry")
+        c = cfg()
+        c["keep_sort_alphabetically"] = True
+        res = core.reconcile_sp(c, FakeKeep([note]), FakeSP(), {})
+        self.assertEqual([i.text for i in note.items], ["apple", "banana", "cherry"])
+        self.assertTrue(res.keep_dirty)
+
+    def test_already_sorted_list_is_not_marked_dirty(self):
+        note = self._ordered_list("apple", "banana")
+        c = cfg()
+        c["keep_sort_alphabetically"] = True
+        res = core.reconcile_sp(c, FakeKeep([note]), FakeSP(), {})
+        self.assertEqual([i.text for i in note.items], ["apple", "banana"])  # sanity: fixture is as intended
+        self.assertFalse(res.keep_dirty)
+
+    def test_sort_is_case_insensitive(self):
+        note = self._ordered_list("banana", "Apple")
+        c = cfg()
+        c["keep_sort_alphabetically"] = True
+        core.reconcile_sp(c, FakeKeep([note]), FakeSP(), {})
+        self.assertEqual([i.text for i in note.items], ["Apple", "banana"])
+
+
+class LooksAlreadyPrefixedTests(unittest.TestCase):
+    def test_prefixed_text_matches(self):
+        self.assertTrue(core.looks_already_prefixed("Walmart - Toilet tablets"))
+
+    def test_plain_text_does_not_match(self):
+        self.assertFalse(core.looks_already_prefixed("from walmart add toilet tablets"))
+
+    def test_blank_text_does_not_match(self):
+        self.assertFalse(core.looks_already_prefixed(""))
+        self.assertFalse(core.looks_already_prefixed(None))
+
+
+class GetAnthropicApiKeyTests(unittest.TestCase):
+    def test_config_value_wins(self):
+        self.assertEqual(core.get_anthropic_api_key({"anthropic_api_key": "cfg-key"}), "cfg-key")
+
+    def test_falls_back_to_env_var(self):
+        with unittest.mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": "env-key"}, clear=False):
+            self.assertEqual(core.get_anthropic_api_key({"anthropic_api_key": ""}), "env-key")
+
+    def test_neither_set_is_blank(self):
+        with unittest.mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(core.get_anthropic_api_key({}), "")
+
+
+class AiMerchantPrefixTests(unittest.TestCase):
+    """core.ai_merchant_prefix: one Claude call, "Merchant - Item" or None."""
+
+    def _mock_response(self, text):
+        resp = unittest.mock.Mock()
+        resp.raise_for_status = lambda: None
+        resp.json = lambda: {"content": [{"type": "text", "text": text}]}
+        return resp
+
+    def test_renamed_text_is_returned(self):
+        with unittest.mock.patch.object(core.requests, "post",
+                                         return_value=self._mock_response("Walmart - Toilet tablets")):
+            result = core.ai_merchant_prefix("from walmart add toilet tablets", "key")
+        self.assertEqual(result, "Walmart - Toilet tablets")
+
+    def test_none_reply_means_no_merchant(self):
+        with unittest.mock.patch.object(core.requests, "post", return_value=self._mock_response("NONE")):
+            self.assertIsNone(core.ai_merchant_prefix("mow the lawn", "key"))
+
+    def test_blank_text_short_circuits_without_a_call(self):
+        post = unittest.mock.Mock()
+        with unittest.mock.patch.object(core.requests, "post", post):
+            self.assertIsNone(core.ai_merchant_prefix("   ", "key"))
+        post.assert_not_called()
+
+    def test_blank_api_key_short_circuits_without_a_call(self):
+        post = unittest.mock.Mock()
+        with unittest.mock.patch.object(core.requests, "post", post):
+            self.assertIsNone(core.ai_merchant_prefix("buy milk", ""))
+        post.assert_not_called()
+
+    def test_network_failure_returns_none(self):
+        with unittest.mock.patch.object(core.requests, "post", side_effect=OSError("no network")):
+            self.assertIsNone(core.ai_merchant_prefix("from costco add paper towels", "key"))
+
+    def test_malformed_response_returns_none(self):
+        resp = unittest.mock.Mock()
+        resp.raise_for_status = lambda: None
+        resp.json = lambda: {}
+        with unittest.mock.patch.object(core.requests, "post", return_value=resp):
+            self.assertIsNone(core.ai_merchant_prefix("buy milk", "key"))
+
+    def test_model_and_headers_in_request(self):
+        seen = {}
+        client_post = lambda url, headers=None, json=None, timeout=None: (
+            seen.update({"url": url, "headers": headers, "json": json}), self._mock_response("NONE"),
+        )[1]
+        with unittest.mock.patch.object(core.requests, "post", side_effect=client_post):
+            core.ai_merchant_prefix("buy milk", "my-key", model="claude-haiku-4-5-20251001")
+        self.assertEqual(seen["url"], core.ANTHROPIC_MESSAGES_URL)
+        self.assertEqual(seen["headers"]["x-api-key"], "my-key")
+        self.assertEqual(seen["json"]["model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(seen["json"]["messages"], [{"role": "user", "content": "buy milk"}])
+
+
+class AiRenameRecordTests(unittest.TestCase):
+    def _tmp(self):
+        import tempfile
+        from pathlib import Path
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        return Path(d) / "ai_renamed.json"
+
+    def test_missing_file_returns_empty_dict(self):
+        self.assertEqual(core.load_ai_rename_record(self._tmp()), {})
+
+    def test_round_trip(self):
+        p = self._tmp()
+        core.save_ai_rename_record(p, {"item1": {"result": "renamed", "at": "2026-01-01T00:00:00Z"}})
+        self.assertEqual(core.load_ai_rename_record(p), {"item1": {"result": "renamed", "at": "2026-01-01T00:00:00Z"}})
+
+    def test_corrupt_file_returns_empty_dict(self):
+        p = self._tmp()
+        p.write_text("{not json", encoding="utf-8")
+        self.assertEqual(core.load_ai_rename_record(p), {})
+
+
+class ReconcileAiRenameTests(unittest.TestCase):
+    """reconcile_sp's AI merchant-rename integration: gated by config +
+    ai_rename_record being passed at all, one-shot per item id."""
+
+    def _cfg(self, enabled=True, api_key="test-key"):
+        c = cfg()
+        c["ai_merchant_rename_enabled"] = enabled
+        c["anthropic_api_key"] = api_key
+        return c
+
+    def test_disabled_never_calls_the_ai(self):
+        note, _ = make_list(items=[("from walmart add toilet tablets", False)])
+        sp = FakeSP()
+        with unittest.mock.patch.object(core, "ai_merchant_prefix") as m:
+            core.reconcile_sp(self._cfg(enabled=False), FakeKeep([note]), sp, {}, {})
+        m.assert_not_called()
+        self.assertEqual(note.items[0].text, "from walmart add toilet tablets")
+
+    def test_no_record_passed_never_calls_the_ai(self):
+        # ai_rename_record defaults to None -- the feature is off even if
+        # cfg says enabled, matching every other caller that doesn't wire it.
+        note, _ = make_list(items=[("from walmart add toilet tablets", False)])
+        with unittest.mock.patch.object(core, "ai_merchant_prefix") as m:
+            core.reconcile_sp(self._cfg(), FakeKeep([note]), FakeSP(), {})
+        m.assert_not_called()
+
+    def test_renamed_item_updates_both_keep_text_and_sp_task_title(self):
+        note, _ = make_list(items=[("from walmart add toilet tablets", False)])
+        sp = FakeSP()
+        record = {}
+        with unittest.mock.patch.object(core, "ai_merchant_prefix", return_value="Walmart - Toilet tablets"):
+            res = core.reconcile_sp(self._cfg(), FakeKeep([note]), sp, {}, record)
+        self.assertEqual(note.items[0].text, "Walmart - Toilet tablets")
+        self.assertEqual(next(iter(sp.tasks.values())).title, "Walmart - Toilet tablets")
+        self.assertTrue(res.keep_dirty)
+        self.assertEqual(record[note.items[0].id]["result"], "renamed")
+
+    def test_no_merchant_found_leaves_title_alone_but_records_the_miss(self):
+        note, _ = make_list(items=[("mow the lawn", False)])
+        sp = FakeSP()
+        record = {}
+        with unittest.mock.patch.object(core, "ai_merchant_prefix", return_value=None):
+            res = core.reconcile_sp(self._cfg(), FakeKeep([note]), sp, {}, record)
+        self.assertEqual(note.items[0].text, "mow the lawn")
+        self.assertFalse(res.keep_dirty)
+        self.assertEqual(record[note.items[0].id]["result"], "no_merchant")
+
+    def test_already_recorded_item_is_not_asked_again(self):
+        note, handles = make_list(items=[("buy milk", False)])
+        item_id = handles["buy milk"].id
+        record = {item_id: {"result": "no_merchant", "at": "2026-01-01T00:00:00Z"}}
+        with unittest.mock.patch.object(core, "ai_merchant_prefix") as m:
+            core.reconcile_sp(self._cfg(), FakeKeep([note]), FakeSP(), {}, record)
+        m.assert_not_called()
+
+    def test_already_prefixed_text_is_skipped_without_a_call(self):
+        note, _ = make_list(items=[("Costco - Paper towels", False)])
+        record = {}
+        with unittest.mock.patch.object(core, "ai_merchant_prefix") as m:
+            core.reconcile_sp(self._cfg(), FakeKeep([note]), FakeSP(), {}, record)
+        m.assert_not_called()
+        self.assertEqual(note.items[0].text, "Costco - Paper towels")
+
+    def test_blank_api_key_never_calls_the_ai(self):
+        note, _ = make_list(items=[("from walmart add toilet tablets", False)])
+        with unittest.mock.patch.object(core, "ai_merchant_prefix") as m:
+            with unittest.mock.patch.dict("os.environ", {}, clear=True):
+                core.reconcile_sp(self._cfg(api_key=""), FakeKeep([note]), FakeSP(), {}, {})
+        m.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,5 +8,8 @@
   "sp_project_id": "the target SP project id (GET /projects lists them)",
   "sp_new_task_tag_ids": [],
   "sp_default_task_minutes": 0,
-  "keep_note_title": "the exact title of the Keep checklist to sync"
+  "keep_note_title": "the exact title of the Keep checklist to sync",
+  "keep_sort_alphabetically": false,
+  "ai_merchant_rename_enabled": false,
+  "anthropic_api_key": "optional: only needed if ai_merchant_rename_enabled is true; falls back to the ANTHROPIC_API_KEY env var"
 }
