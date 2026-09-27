@@ -5,8 +5,10 @@
 ; logic parses it); VersionTag keeps the 'v' for the output filename, matching this repo's
 ; tag convention and core.WINDOWS_INSTALLER_ASSET_PREFIX's expectations.
 ;
-; Single self-contained PyInstaller --onefile exe -- unlike the sibling Index2SP project,
-; there's no framework-dependent variant to build here.
+; Single self-contained PyInstaller --onedir build (see build-windows-tray.yml for why
+; not --onefile: onefile's runtime extraction to %TEMP% is a well-known antivirus
+; false-positive trigger, surfacing as "python312.dll not found") -- unlike the sibling
+; Index2SP project, there's no framework-dependent variant to build here.
 
 #define AppName "Keep Sync"
 #ifndef AppVersion
@@ -55,7 +57,9 @@ Name: "startup"; Description: "Start {#AppName} automatically when I sign in to 
 Name: "runafterinstall"; Description: "Run {#AppName} now"; GroupDescription: "After installation:"; Flags: unchecked
 
 [Files]
-Source: "..\dist\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; The whole onedir output (KeepSyncTray.exe + its _internal\ dependencies),
+; not just the exe -- see the note above on why this isn't --onefile.
+Source: "..\dist\KeepSyncTray\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\config.example.json"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -81,6 +85,7 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/IM {#AppExeName} /F"; Flags: runhi
 ; No [UninstallDelete] for {app}: unlike Index2SP, this app writes config.json
 ; and its logs INTO the install directory (see keep_sync_tray.APP_DIR/CONFIG_PATH),
 ; not to %APPDATA%. Inno's default uninstall only removes the files it itself
-; installed (the exe, README.md, config.example.json), which leaves config.json,
-; the logs, and the state token in ~/.sp-keep-sync all in place -- reinstalling
-; later picks the sync config back up rather than starting from a blank setup.
+; installed (the onedir tree, README.md, config.example.json), which leaves
+; config.json, the logs, and the state token in ~/.sp-keep-sync all in place --
+; reinstalling later picks the sync config back up rather than starting from a
+; blank setup.

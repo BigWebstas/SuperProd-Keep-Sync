@@ -77,8 +77,8 @@ cleanly with Plasma.
 pip install -r requirements-windows.txt   # or requirements-linux.txt
 python keep_sync_tray.py                   # or keep_sync_tray_qt.py
 
-# standalone binary:
-pyinstaller --onefile --windowed --name KeepSyncTray --icon packaging\windows\keepsync.ico keep_sync_tray.py
+# standalone binary (a KeepSyncTray/ folder, not a single .exe -- see below):
+pyinstaller --onedir --windowed --name KeepSyncTray --icon packaging\windows\keepsync.ico keep_sync_tray.py
 
 # Windows installer (needs Inno Setup: https://jrsoftware.org/isinfo.php):
 iscc /DAppVersion=2.2.15 /DVersionTag=v2.2.15 installer\KeepSyncTray.iss
@@ -87,9 +87,14 @@ iscc /DAppVersion=2.2.15 /DVersionTag=v2.2.15 installer\KeepSyncTray.iss
 On Windows, `KeepSyncTray-Setup-vX.Y.Z.exe` (built by the command above, or
 downloaded from a [release](https://github.com/BigWebstas/SuperProd-Keep-Sync/releases))
 is the easiest way to get set up: per-user install (no admin needed), an optional
-"start at login" checkbox, a Start Menu entry. `config.json` and logs live in the
-install folder either way, same as the plain `.exe`; uninstalling leaves them and
-`~/.sp-keep-sync` in place, so reinstalling picks the sync config back up.
+"start at login" checkbox, a Start Menu entry. Prefer no installer? The release also
+has `KeepSyncTray-vX.Y.Z.zip` — unzip it anywhere and run `KeepSyncTray.exe` from
+inside the folder. Deliberately **not** a single-file `--onefile` exe: that packaging
+extracts everything to a fresh temp folder on every launch, and antivirus quarantining
+that freshly-extracted DLL is a well-known false positive that surfaces as
+"python312.dll not found". `config.json` and logs live in that same folder either
+way (installed or unzipped); uninstalling/deleting leaves them and `~/.sp-keep-sync`
+in place, so reinstalling picks the sync config back up.
 
 First launch shows a setup window: Google email, OAuth Token (an "Open sign-in
 page" button next to the field launches the embedded sign-in URL in your default

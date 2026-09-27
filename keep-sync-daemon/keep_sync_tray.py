@@ -14,8 +14,9 @@ This is the GUI/packaged alternative to keep_sync_daemon.py, which is
 meant to be invoked by an external scheduler (cron/systemd timer/Task
 Scheduler) instead.
 
-Packaging into a standalone .exe (see README.md for the full command):
-    pyinstaller --onefile --windowed --name KeepSyncTray --icon packaging/windows/keepsync.ico keep_sync_tray.py
+Packaging into a standalone build (a folder, not a single .exe -- see the
+--onedir note in build-windows-tray.yml; see README.md for the full command):
+    pyinstaller --onedir --windowed --name KeepSyncTray --icon packaging/windows/keepsync.ico keep_sync_tray.py
 """
 from __future__ import annotations
 

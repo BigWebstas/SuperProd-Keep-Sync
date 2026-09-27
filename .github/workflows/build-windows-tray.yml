@@ -40,9 +40,19 @@ jobs:
           echo "tag=$tag" >> $env:GITHUB_OUTPUT
           echo "numeric=$numeric" >> $env:GITHUB_OUTPUT
 
+      # --onedir, not --onefile: a onefile exe extracts python312.dll (and
+      # everything else) to a fresh %TEMP%\_MEIxxxxxx on every launch, and
+      # antivirus quarantining that freshly-extracted, unsigned, no-reputation
+      # DLL right after extraction is a well-known false positive -- it
+      # surfaces to the user as "python312.dll not found". onedir ships every
+      # file already sitting in the install folder, so there's nothing to
+      # extract (or for AV to grab) at launch. The installer (below) already
+      # handles bundling a folder instead of one file; the zip step further
+      # down covers the no-installer "just hand me a binary" case that
+      # --onefile used to serve.
       - name: Build exe
         run: >-
-          pyinstaller --onefile --windowed --name KeepSyncTray
+          pyinstaller --onedir --windowed --name KeepSyncTray
           --icon packaging\windows\keepsync.ico
           --copy-metadata gpsoauth --copy-metadata gkeepapi
           --hidden-import _keep_sync_version
@@ -50,17 +60,16 @@ jobs:
 
       # Diagnostic: a "STATUS_BREAKPOINT" (0x80000003) crash in _json in the
       # frozen build classically means a debug-built binary got bundled.
-      # A throwaway --onedir build lets us look.
+      # The real build is already --onedir, so this inspects it directly
+      # instead of a second throwaway build.
       - name: Inspect the bundle for debug binaries
         continue-on-error: true
         run: |
           python -c "import sys,_json,_ssl; print('python', sys.version); print('_json', _json.__file__); print('_ssl', _ssl.__file__)"
-          pyinstaller --onedir --windowed --name _inspect --hidden-import _keep_sync_version keep_sync_tray.py 2>&1 | Out-Null
-          $sus = Get-ChildItem -Recurse dist\_inspect -Include *_d.pyd,*_d.dll,python*_d.dll,ucrtbased.dll,vcruntime*d.dll,msvcp*d.dll -ErrorAction SilentlyContinue
+          $sus = Get-ChildItem -Recurse dist\KeepSyncTray -Include *_d.pyd,*_d.dll,python*_d.dll,ucrtbased.dll,vcruntime*d.dll,msvcp*d.dll -ErrorAction SilentlyContinue
           if ($sus) { Write-Host "SUSPECT DEBUG BINARIES:"; $sus | ForEach-Object { $_.FullName } }
           else { Write-Host "no obviously-debug binaries in the bundle" }
-          Get-ChildItem dist\_inspect\_internal -Filter *.pyd | Select-Object Name,Length | Format-Table -AutoSize
-          Remove-Item -Recurse -Force dist\_inspect,build\_inspect -ErrorAction SilentlyContinue
+          Get-ChildItem dist\KeepSyncTray\_internal -Filter *.pyd | Select-Object Name,Length | Format-Table -AutoSize
 
       - name: Self-test the built exe
         timeout-minutes: 3
@@ -72,7 +81,7 @@ jobs:
         # ALWAYS dump every log (the redirected streams plus the app's own
         # keep_sync_tray.log / .fault.log) so a hang is still diagnosable.
         run: |
-          $proc = Start-Process -FilePath ".\dist\KeepSyncTray.exe" -PassThru `
+          $proc = Start-Process -FilePath ".\dist\KeepSyncTray\KeepSyncTray.exe" -PassThru `
             -RedirectStandardOutput selftest-stdout.log -RedirectStandardError selftest-stderr.log
           $done = $proc.WaitForExit(90000)
           if (-not $done) { try { $proc.Kill($true) } catch {} }
@@ -80,10 +89,10 @@ jobs:
           Get-Content selftest-stdout.log -ErrorAction SilentlyContinue
           Write-Host "=== selftest-stderr.log ==="
           Get-Content selftest-stderr.log -ErrorAction SilentlyContinue
-          Write-Host "=== dist\keep_sync_tray.log ==="
-          Get-Content dist\keep_sync_tray.log -ErrorAction SilentlyContinue
-          Write-Host "=== dist\keep_sync_tray.fault.log ==="
-          Get-Content dist\keep_sync_tray.fault.log -ErrorAction SilentlyContinue
+          Write-Host "=== dist\KeepSyncTray\keep_sync_tray.log ==="
+          Get-Content dist\KeepSyncTray\keep_sync_tray.log -ErrorAction SilentlyContinue
+          Write-Host "=== dist\KeepSyncTray\keep_sync_tray.fault.log ==="
+          Get-Content dist\KeepSyncTray\keep_sync_tray.fault.log -ErrorAction SilentlyContinue
           if (-not $done) { throw "KeepSyncTray.exe self-test did not exit within 90s" }
           if ($proc.ExitCode -ne 0) {
             throw "KeepSyncTray.exe self-test exited with code $($proc.ExitCode)"
@@ -98,11 +107,18 @@ jobs:
           /DVersionTag=${{ steps.version.outputs.tag }}
           installer\KeepSyncTray.iss
 
+      # Portable, no-installer option: a zip of the same onedir folder the
+      # installer bundles, for anyone who wants to just unzip and run rather
+      # than install. This is what --onefile used to give as a single file;
+      # a zip is the closest onedir equivalent.
+      - name: Zip the portable build
+        run: Compress-Archive -Path dist\KeepSyncTray\* -DestinationPath "dist\KeepSyncTray-${{ steps.version.outputs.tag }}.zip"
+
       - uses: actions/upload-artifact@v4
         with:
           name: KeepSyncTray
           path: |
-            keep-sync-daemon/dist/KeepSyncTray.exe
+            keep-sync-daemon/dist/KeepSyncTray-*.zip
             keep-sync-daemon/dist/KeepSyncTray-Setup-*.exe
           if-no-files-found: error
 
