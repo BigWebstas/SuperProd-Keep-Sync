@@ -27,7 +27,7 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSpinBox,
@@ -462,8 +463,39 @@ class StatusDialog(QDialog):
         version_label.setStyleSheet("color: gray;")
         version_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(version_label, row, 0, 1, 2)
+        row += 1
+
+        layout.addWidget(QLabel("Log:"), row, 0, 1, 2)
+        row += 1
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(2000)  # cap growth for a long-open window
+        self.log_view.setStyleSheet("font-family: monospace; font-size: 10pt;")
+        self.log_view.setMinimumSize(420, 160)
+        layout.addWidget(self.log_view, row, 0, 1, 2)
+
+        # Polled, not pushed: reuses the same log file setup_logging() already
+        # writes (see core.LogTailer), so there's no second logging handler
+        # to keep wired up. Parented to self -- Qt stops/deletes it along
+        # with this dialog, same lifetime as everything else here.
+        self._log_tailer = core.LogTailer(log.log_path)
+        self.log_view.setPlainText(self._log_tailer.seed())
+        self._scroll_log_to_bottom()
+        self._log_timer = QTimer(self)
+        self._log_timer.timeout.connect(self._poll_log)
+        self._log_timer.start(1000)
 
         app.status_changed.connect(self.status_label.setText)
+
+    def _poll_log(self) -> None:
+        new_text = self._log_tailer.read_new()
+        if new_text:
+            self.log_view.appendPlainText(new_text.rstrip("\n"))
+            self._scroll_log_to_bottom()
+
+    def _scroll_log_to_bottom(self) -> None:
+        bar = self.log_view.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def _reconfigure(self) -> None:
         self.accept()

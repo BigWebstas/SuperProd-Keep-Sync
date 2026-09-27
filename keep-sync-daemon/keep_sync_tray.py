@@ -458,8 +458,39 @@ class StatusWindow(tk.Tk):
         tk.Label(self, text=f"Version {core.get_version()}", anchor="w", fg="gray").grid(
             row=row, column=0, columnspan=2, sticky="w", **pad
         )
+        row += 1
+
+        tk.Label(self, text="Log:", anchor="w").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        log_frame = tk.Frame(self)
+        log_frame.grid(row=row, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="nsew")
+        self.log_text = tk.Text(log_frame, height=12, width=56, state="disabled", wrap="none")
+        log_scroll = tk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        self.log_text.config(yscrollcommand=log_scroll.set)
+        self.log_text.pack(side="left", fill="both", expand=True)
+        log_scroll.pack(side="left", fill="y")
+
+        # Polled, not pushed: reuses the same log file setup_logging() already
+        # writes (see core.LogTailer), so there's no second logging handler
+        # to keep wired up. Folded into the same poll loop as the status
+        # line below rather than a second .after() chain.
+        self._log_tailer = core.LogTailer(log.log_path)
+        self._append_log_text(self._log_tailer.seed())
 
         self._refresh_status()
+
+    LOG_MAX_LINES = 2000  # caps growth for a long-open window; matches the Qt tray's setMaximumBlockCount
+
+    def _append_log_text(self, text: str) -> None:
+        if not text:
+            return
+        self.log_text.config(state="normal")
+        self.log_text.insert(tk.END, text if text.endswith("\n") else text + "\n")
+        overflow = int(self.log_text.index("end-1c").split(".")[0]) - self.LOG_MAX_LINES
+        if overflow > 0:
+            self.log_text.delete("1.0", f"{overflow + 1}.0")
+        self.log_text.see(tk.END)
+        self.log_text.config(state="disabled")
 
     def _open_release_page(self, event=None) -> None:
         if self.app.update_info:
@@ -469,6 +500,7 @@ class StatusWindow(tk.Tk):
         self.status_var.set(self.app.status or "Waiting for the first sync...")
         info = self.app.update_info
         self.update_var.set(f"Update available: {info.version} (click to open)" if info else "")
+        self._append_log_text(self._log_tailer.read_new())
         self.after(1000, self._refresh_status)
 
     def _sync_now(self) -> None:

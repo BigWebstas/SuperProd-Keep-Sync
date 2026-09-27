@@ -442,6 +442,52 @@ def install_qt_message_handler(logger: "logging.Logger | None" = None) -> bool:
     return True
 
 
+class LogTailer:
+    """Incremental reader for the status window's live log view: tracks a
+    byte offset into `path` (the same file setup_logging() already writes),
+    so a poll timer can grab just what's new since the last call instead of
+    re-reading the whole file. A rotated/truncated file (size < last known
+    offset -- TimedRotatingFileHandler starts a fresh one at midnight, or a
+    frozen build's log got recreated) just restarts from the top rather
+    than raising. Never raises: a log file that's momentarily locked or
+    missing just means this poll returns nothing, not a broken window."""
+
+    def __init__(self, path: "Path"):
+        self.path = Path(path)
+        self._offset = 0
+
+    def seed(self, max_lines: int = 200) -> str:
+        """Initial content for the view: up to the last `max_lines` of the
+        file, and positions the tailer at EOF so a following read_new()
+        only returns text appended after this call."""
+        try:
+            text = self.path.read_text(encoding="utf-8", errors="replace")
+            self._offset = self.path.stat().st_size
+        except OSError:
+            self._offset = 0
+            return ""
+        lines = text.splitlines()
+        return "\n".join(lines[-max_lines:])
+
+    def read_new(self) -> str:
+        """Text appended since the last seed()/read_new() call, or "" if
+        there's nothing new (or the file is temporarily unreadable)."""
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            return ""
+        if size < self._offset:
+            self._offset = 0  # rotated or truncated -- start over
+        try:
+            with self.path.open("r", encoding="utf-8", errors="replace") as fh:
+                fh.seek(self._offset)
+                text = fh.read()
+                self._offset = fh.tell()
+        except OSError:
+            return ""
+        return text
+
+
 def log_callback_errors(label: str, reraise: bool = False):
     """Decorator for a Qt slot or a background thread target: logs any
     exception with a traceback (and by default swallows it so the tray

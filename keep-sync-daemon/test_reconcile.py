@@ -1127,5 +1127,66 @@ class ReconcileAiRenameTests(unittest.TestCase):
         m.assert_not_called()
 
 
+class LogTailerTests(unittest.TestCase):
+    """core.LogTailer: the status window's live log view."""
+
+    def _tmp(self):
+        import tempfile
+        from pathlib import Path
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        return Path(d) / "keep_sync.log"
+
+    def test_seed_returns_existing_content(self):
+        p = self._tmp()
+        p.write_text("line1\nline2\n", encoding="utf-8")
+        tailer = core.LogTailer(p)
+        self.assertEqual(tailer.seed(), "line1\nline2")
+
+    def test_seed_caps_to_max_lines(self):
+        p = self._tmp()
+        p.write_text("\n".join(f"line{i}" for i in range(10)) + "\n", encoding="utf-8")
+        tailer = core.LogTailer(p)
+        self.assertEqual(tailer.seed(max_lines=3), "line7\nline8\nline9")
+
+    def test_seed_missing_file_returns_empty_and_does_not_raise(self):
+        tailer = core.LogTailer(self._tmp())  # never written
+        self.assertEqual(tailer.seed(), "")
+
+    def test_read_new_returns_nothing_before_any_append(self):
+        p = self._tmp()
+        p.write_text("line1\n", encoding="utf-8")
+        tailer = core.LogTailer(p)
+        tailer.seed()
+        self.assertEqual(tailer.read_new(), "")
+
+    def test_read_new_returns_appended_text(self):
+        p = self._tmp()
+        p.write_text("line1\n", encoding="utf-8")
+        tailer = core.LogTailer(p)
+        tailer.seed()
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write("line2\n")
+        self.assertEqual(tailer.read_new(), "line2\n")
+        self.assertEqual(tailer.read_new(), "")  # nothing new the second time
+
+    def test_read_new_handles_rotation_by_restarting_from_top(self):
+        p = self._tmp()
+        p.write_text("a long first line that will be rotated away\n", encoding="utf-8")
+        tailer = core.LogTailer(p)
+        tailer.seed()
+        p.write_text("fresh\n", encoding="utf-8")  # simulates a rotated, shorter file
+        self.assertEqual(tailer.read_new(), "fresh\n")
+
+    def test_read_new_missing_file_returns_empty(self):
+        p = self._tmp()
+        p.write_text("line1\n", encoding="utf-8")
+        tailer = core.LogTailer(p)
+        tailer.seed()
+        p.unlink()
+        self.assertEqual(tailer.read_new(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

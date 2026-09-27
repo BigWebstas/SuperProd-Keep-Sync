@@ -104,6 +104,10 @@ folder, Reconfigure, and Quit. `config.json` and the autostart entry are
 written next to the binary, so keep it in a stable
 folder.
 
+The status window also tails its own log file live (the same one described
+below), so you can watch a sync happen without opening the log in a separate
+editor.
+
 The status window also shows a link when a newer release is available (checked at
 most once a day); the tray fires a one-time notification the moment it notices.
 **Check for update** in the menu bypasses that once-a-day cache for an on-demand
