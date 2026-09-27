@@ -111,7 +111,10 @@ folder.
 
 The status window also tails its own log file live (the same one described
 below), so you can watch a sync happen without opening the log in a separate
-editor.
+editor — the window is resizable if you want to see more of it. If
+`ai_merchant_rename_enabled` is on, it also shows the model in use and whether
+that API key can currently reach Anthropic (checked once when the window opens,
+not polled).
 
 The status window also shows a link when a newer release is available (checked at
 most once a day); the tray fires a one-time notification the moment it notices.

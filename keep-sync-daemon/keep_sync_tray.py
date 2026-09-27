@@ -412,7 +412,8 @@ class StatusWindow(tk.Tk):
         self.app = app
 
         self.title(APP_NAME)
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.minsize(420, 420)
 
         pad = {"padx": 10, "pady": 6}
         row = 0
@@ -433,6 +434,14 @@ class StatusWindow(tk.Tk):
             row=row, column=0, columnspan=2, sticky="w", **pad
         )
         row += 1
+
+        self.ai_status_var = tk.StringVar()
+        self.ai_status_label = tk.Label(self, textvariable=self.ai_status_var, anchor="w")
+        self.ai_status_label.grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        self._ai_status_text: str | None = None
+        self._ai_status_color = "gray"
+        self._init_ai_status()
 
         self.status_var = tk.StringVar()
         tk.Label(self, textvariable=self.status_var, wraplength=340, justify="left", anchor="w").grid(
@@ -470,6 +479,12 @@ class StatusWindow(tk.Tk):
         self.log_text.config(yscrollcommand=log_scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         log_scroll.pack(side="left", fill="y")
+        # The window is resizable (see resizable() above); this is what
+        # actually sends the extra space to the log row instead of leaving
+        # it as blank padding elsewhere when the window is enlarged.
+        self.grid_rowconfigure(row, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
 
         # Polled, not pushed: reuses the same log file setup_logging() already
         # writes (see core.LogTailer), so there's no second logging handler
@@ -481,6 +496,33 @@ class StatusWindow(tk.Tk):
         self._refresh_status()
 
     LOG_MAX_LINES = 2000  # caps growth for a long-open window; matches the Qt tray's setMaximumBlockCount
+
+    def _init_ai_status(self) -> None:
+        enabled = bool(self.app.cfg.get("ai_merchant_rename_enabled"))
+        model = (self.app.cfg.get("ai_merchant_rename_model") or "").strip() or core.DEFAULT_AI_RENAME_MODEL
+        api_key = core.get_anthropic_api_key(self.app.cfg)
+        if not enabled:
+            self._ai_status_text, self._ai_status_color = "AI rename: off", "gray"
+        elif not api_key:
+            self._ai_status_text = f"AI rename: {model} — no API key set"
+            self._ai_status_color = "#c0392b"
+        else:
+            self._ai_status_text = f"AI rename: {model} — checking…"
+            self._ai_status_color = "gray"
+            threading.Thread(
+                target=self._check_ai_connection, args=(api_key, model), daemon=True, name="ai-status-check",
+            ).start()
+
+    def _check_ai_connection(self, api_key: str, model: str) -> None:
+        connected = core.check_anthropic_connection(api_key)
+        # Plain attribute writes read back by the next _refresh_status tick
+        # -- same cross-thread pattern already used for app.status/
+        # app._download_percent elsewhere in this file (safe under the GIL).
+        if connected:
+            self._ai_status_text, self._ai_status_color = f"AI rename: {model} — connected", "#1a7f37"
+        else:
+            self._ai_status_text = f"AI rename: {model} — not reachable"
+            self._ai_status_color = "#c0392b"
 
     def _append_log_text(self, text: str) -> None:
         if not text:
@@ -501,6 +543,8 @@ class StatusWindow(tk.Tk):
         self.status_var.set(self.app.status or "Waiting for the first sync...")
         info = self.app.update_info
         self.update_var.set(f"Update available: {info.version} (click to open)" if info else "")
+        self.ai_status_var.set(self._ai_status_text or "")
+        self.ai_status_label.config(fg=self._ai_status_color)
         self._append_log_text(self._log_tailer.read_new())
         self.after(1000, self._refresh_status)
 

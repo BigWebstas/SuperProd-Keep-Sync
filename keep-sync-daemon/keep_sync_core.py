@@ -662,6 +662,7 @@ def _default_task_estimate_ms(cfg: dict) -> "int | None":
 # not a merchant was found, so this is a one-shot cost, not a per-pass one.
 
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
 DEFAULT_AI_RENAME_MODEL = "claude-haiku-4-5-20251001"
 _AI_RENAME_SYSTEM_PROMPT = (
     "You clean up shopping-list entries dictated as free text. If the text names a "
@@ -683,6 +684,25 @@ def get_anthropic_api_key(cfg: dict) -> str:
 
 def looks_already_prefixed(text: str) -> bool:
     return bool(_ALREADY_PREFIXED_RE.search(text or ""))
+
+
+def check_anthropic_connection(api_key: str, timeout: float = 5.0) -> bool:
+    """True if `api_key` can reach Anthropic's API right now -- for a status
+    display, not the rename path itself. Hits the models-list endpoint
+    (free, no completion tokens spent) rather than running a real rename
+    just to answer "is this working". Never raises: any failure (bad key,
+    network, timeout) is just False."""
+    if not api_key:
+        return False
+    try:
+        resp = requests.get(
+            ANTHROPIC_MODELS_URL,
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+            timeout=timeout,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 
 def ai_merchant_prefix(

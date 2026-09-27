@@ -1033,6 +1033,33 @@ class AiMerchantPrefixTests(unittest.TestCase):
         self.assertEqual(seen["json"]["messages"], [{"role": "user", "content": "buy milk"}])
 
 
+class CheckAnthropicConnectionTests(unittest.TestCase):
+    """core.check_anthropic_connection: a status-display probe, not part of
+    the rename path -- hits the free models-list endpoint."""
+
+    def test_200_is_connected(self):
+        resp = unittest.mock.Mock(status_code=200)
+        with unittest.mock.patch.object(core.requests, "get", return_value=resp) as m:
+            self.assertTrue(core.check_anthropic_connection("key"))
+        self.assertEqual(m.call_args.args[0], core.ANTHROPIC_MODELS_URL)
+        self.assertEqual(m.call_args.kwargs["headers"]["x-api-key"], "key")
+
+    def test_401_is_not_connected(self):
+        resp = unittest.mock.Mock(status_code=401)
+        with unittest.mock.patch.object(core.requests, "get", return_value=resp):
+            self.assertFalse(core.check_anthropic_connection("bad-key"))
+
+    def test_network_failure_is_not_connected(self):
+        with unittest.mock.patch.object(core.requests, "get", side_effect=OSError("no network")):
+            self.assertFalse(core.check_anthropic_connection("key"))
+
+    def test_blank_key_short_circuits_without_a_call(self):
+        get = unittest.mock.Mock()
+        with unittest.mock.patch.object(core.requests, "get", get):
+            self.assertFalse(core.check_anthropic_connection(""))
+        get.assert_not_called()
+
+
 class AiRenameRecordTests(unittest.TestCase):
     def _tmp(self):
         import tempfile

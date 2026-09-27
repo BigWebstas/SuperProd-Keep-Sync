@@ -418,6 +418,8 @@ def run_setup_dialog(cfg: dict) -> dict | None:
 
 
 class StatusDialog(QDialog):
+    ai_connection_checked = Signal(bool, str)  # (connected, model) -- from a worker thread
+
     def __init__(self, app: "TrayApp", parent=None):
         super().__init__(parent)
         self.app = app
@@ -437,6 +439,12 @@ class StatusDialog(QDialog):
         tags = app.cfg.get("sp_new_task_tag_titles") or app.cfg.get("sp_new_task_tag_ids") or []
         layout.addWidget(QLabel(f"Tags on new tasks: {', '.join(tags) if tags else 'none'}"), row, 0, 1, 2)
         row += 1
+
+        self.ai_status_label = QLabel()
+        layout.addWidget(self.ai_status_label, row, 0, 1, 2)
+        row += 1
+        self.ai_connection_checked.connect(self._on_ai_connection_checked)
+        self._init_ai_status()
 
         self.status_label = QLabel(app.status)
         self.status_label.setWordWrap(True)
@@ -473,6 +481,10 @@ class StatusDialog(QDialog):
         self.log_view.setStyleSheet("font-family: monospace; font-size: 10pt;")
         self.log_view.setMinimumSize(420, 160)
         layout.addWidget(self.log_view, row, 0, 1, 2)
+        # The dialog is resizable by default; this just makes sure extra
+        # space actually goes to the log rather than sitting as blank
+        # padding elsewhere when the window is enlarged.
+        layout.setRowStretch(row, 1)
 
         # Polled, not pushed: reuses the same log file setup_logging() already
         # writes (see core.LogTailer), so there's no second logging handler
@@ -485,7 +497,39 @@ class StatusDialog(QDialog):
         self._log_timer.timeout.connect(self._poll_log)
         self._log_timer.start(1000)
 
+        self.resize(520, 520)
+
         app.status_changed.connect(self.status_label.setText)
+
+    def _init_ai_status(self) -> None:
+        enabled = bool(self.app.cfg.get("ai_merchant_rename_enabled"))
+        model = (self.app.cfg.get("ai_merchant_rename_model") or "").strip() or core.DEFAULT_AI_RENAME_MODEL
+        api_key = core.get_anthropic_api_key(self.app.cfg)
+        if not enabled:
+            self.ai_status_label.setText("AI rename: off")
+            self.ai_status_label.setStyleSheet("color: gray;")
+        elif not api_key:
+            self.ai_status_label.setText(f"AI rename: {model} — no API key set")
+            self.ai_status_label.setStyleSheet("color: #c0392b;")
+        else:
+            self.ai_status_label.setText(f"AI rename: {model} — checking…")
+            self.ai_status_label.setStyleSheet("color: gray;")
+            threading.Thread(
+                target=self._check_ai_connection, args=(api_key, model), daemon=True, name="ai-status-check",
+            ).start()
+
+    def _check_ai_connection(self, api_key: str, model: str) -> None:
+        connected = core.check_anthropic_connection(api_key)
+        self.ai_connection_checked.emit(connected, model)
+
+    @core.log_callback_errors("ai connection status")
+    def _on_ai_connection_checked(self, connected: bool, model: str) -> None:
+        if connected:
+            self.ai_status_label.setText(f"AI rename: {model} — connected")
+            self.ai_status_label.setStyleSheet("color: #1a7f37;")
+        else:
+            self.ai_status_label.setText(f"AI rename: {model} — not reachable")
+            self.ai_status_label.setStyleSheet("color: #c0392b;")
 
     def _poll_log(self) -> None:
         new_text = self._log_tailer.read_new()
