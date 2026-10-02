@@ -639,6 +639,20 @@ def load_config(config_path: Path) -> dict:
     old_tag_id = (cfg.pop("sp_new_task_tag_id", "") or "").strip()
     if old_tag_id and not cfg["sp_new_task_tag_ids"]:
         cfg["sp_new_task_tag_ids"] = [old_tag_id]
+
+    # Secrets normally live in the OS keychain, blank in the file. A value
+    # still in the file (an older config.json, a hand edit, or a box with no
+    # keychain) wins, and gets moved into the keychain when there is one.
+    in_file = [f for f in SECRET_CONFIG_FIELDS if cfg[f]]
+    for f in SECRET_CONFIG_FIELDS:
+        if not cfg[f]:
+            cfg[f] = _secret_get(f)
+    if in_file and _keyring() is not None:
+        try:
+            save_config(config_path, cfg)
+        except OSError:
+            logging.getLogger(LOGGER_NAME).warning(
+                "couldn't move secrets out of %s", config_path, exc_info=True)
     return cfg
 
 
@@ -760,21 +774,95 @@ def atomic_write_json(path: Path, data: dict, mode: int = 0o600, indent: "int | 
         raise
 
 
+# Secrets (SP token, Anthropic key, Keep master token) go in the OS keychain
+# -- Windows Credential Manager, Secret Service/KWallet on Linux -- via
+# `keyring`. With no usable keychain (headless box, no D-Bus session, keyring
+# not installed) they stay in the owner-only (0600) files as before.
+KEYRING_SERVICE = "SuperProd-Keep-Sync"
+SECRET_CONFIG_FIELDS = ("sp_access_token", "anthropic_api_key")
+MASTER_TOKEN_SECRET = "keep_master_token"
+
+
+def _keyring():
+    """The keyring module when a real backend is available, else None
+    (keyring's fail/null backends have priority <= 0)."""
+    try:
+        import keyring
+        if keyring.get_keyring().priority <= 0:
+            return None
+        return keyring
+    except Exception:
+        return None
+
+
+def _secret_get(name: str) -> str:
+    kr = _keyring()
+    if kr is None:
+        return ""
+    try:
+        return kr.get_password(KEYRING_SERVICE, name) or ""
+    except Exception:
+        logging.getLogger(LOGGER_NAME).warning("keychain read of %s failed", name, exc_info=True)
+        return ""
+
+
+def _secret_set(name: str, value: str) -> bool:
+    """Stores `value` in the keychain ("" deletes it). False when there's no
+    usable keychain or it refused -- the caller keeps the value in its file."""
+    kr = _keyring()
+    if kr is None:
+        return False
+    try:
+        if value:
+            kr.set_password(KEYRING_SERVICE, name, value)
+        else:
+            try:
+                kr.delete_password(KEYRING_SERVICE, name)
+            except kr.errors.PasswordDeleteError:
+                pass
+        return True
+    except Exception:
+        logging.getLogger(LOGGER_NAME).warning("keychain write of %s failed", name, exc_info=True)
+        return False
+
+
 def save_config(config_path: Path, cfg: dict) -> None:
-    atomic_write_json(config_path, cfg, mode=0o600)
+    """Writes cfg with its secrets moved to the keychain (blank in the file),
+    or left in the file if the keychain can't take them."""
+    on_disk = dict(cfg)
+    for f in SECRET_CONFIG_FIELDS:
+        if _secret_set(f, cfg.get(f, "")):
+            on_disk[f] = ""
+    atomic_write_json(config_path, on_disk, mode=0o600)
 
 
 def get_master_token(state_dir: Path) -> str:
     token = os.environ.get("KEEP_MASTER_TOKEN")
     if token:
         return token.strip()
+    # A token file is either from before the keychain or from a run without
+    # one (e.g. get_master_token.py over SSH), so it's the newer value: use
+    # it, and move it into the keychain when there is one.
     token_file = state_dir / "master_token"
     if token_file.exists():
-        return token_file.read_text(encoding="utf-8").strip()
+        token = token_file.read_text(encoding="utf-8").strip()
+        if token and _secret_set(MASTER_TOKEN_SECRET, token):
+            token_file.unlink(missing_ok=True)
+        return token
+    token = _secret_get(MASTER_TOKEN_SECRET)
+    if token:
+        return token
     raise RuntimeError(
-        "No master token found. Set KEEP_MASTER_TOKEN or provide one via "
-        f"{token_file} (see README.md)."
+        "No master token found. Set KEEP_MASTER_TOKEN or run get_master_token.py "
+        "(see README.md)."
     )
+
+
+def has_master_token(state_dir: Path) -> bool:
+    try:
+        return bool(get_master_token(state_dir))
+    except RuntimeError:
+        return False
 
 
 def exchange_master_token(email: str, oauth_token: str, android_id: str = DEFAULT_ANDROID_ID) -> str:
@@ -786,19 +874,24 @@ def exchange_master_token(email: str, oauth_token: str, android_id: str = DEFAUL
     return result["Token"]
 
 
-def save_master_token(state_dir: Path, master_token: str) -> Path:
+def save_master_token(state_dir: Path, master_token: str) -> str:
+    """Saves to the keychain, or <state_dir>/master_token (0600) without one.
+    Returns where it went, for display."""
+    token_path = state_dir / "master_token"
+    if _secret_set(MASTER_TOKEN_SECRET, master_token):
+        token_path.unlink(missing_ok=True)
+        return "the system keychain"
     state_dir.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(state_dir, stat.S_IRWXU)
     except OSError:
         pass
-    token_path = state_dir / "master_token"
     token_path.write_text(master_token, encoding="utf-8")
     try:
         os.chmod(token_path, stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
         pass
-    return token_path
+    return f"{token_path} (0600)"
 
 
 # gkeepapi's sync-cursor cache is the whole account's node graph. It's only an

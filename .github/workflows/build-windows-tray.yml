@@ -55,6 +55,7 @@ jobs:
           pyinstaller --onedir --windowed --name KeepSyncTray
           --icon packaging\windows\keepsync.ico
           --copy-metadata gpsoauth --copy-metadata gkeepapi
+          --copy-metadata keyring --collect-submodules keyring.backends
           --hidden-import _keep_sync_version
           keep_sync_tray.py
 
@@ -167,6 +168,7 @@ jobs:
         run: >-
           pyinstaller --onefile --name KeepSyncTrayQt
           --copy-metadata gpsoauth --copy-metadata gkeepapi
+          --copy-metadata keyring --collect-submodules keyring.backends
           --hidden-import _keep_sync_version
           keep_sync_tray_qt.py
 

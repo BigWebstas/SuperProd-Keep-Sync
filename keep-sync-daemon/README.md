@@ -37,6 +37,13 @@ new item like "from walmart add toilet tablets" to "Walmart - Toilet tablets"
 via Claude before creating its SP task — one API call per item, ever, tracked in
 `<state_dir>/ai_renamed.json`.
 
+Secrets (`sp_access_token`, `anthropic_api_key`, the Keep master token) are moved
+into the OS keychain — Windows Credential Manager, or Secret Service/KWallet on
+Linux — the first time the config is loaded, and blanked in the file. To change one
+by hand, just type the new value into `config.json`; it gets moved again. With no
+keychain available (e.g. a headless box with no D-Bus session) they stay in the
+`0600` files.
+
 ## 3. Master token (one-time, the fiddly part)
 
 `gkeepapi` authenticates with a Google "master token" — as powerful as your
@@ -50,8 +57,9 @@ password, so store it carefully.
    - **With 2-Step Verification on, this flow usually fails.** The common
      workaround is to disable 2FA, mint the token, then re-enable it.
 2. `python3 get_master_token.py` and paste the OAuth Token. It reads
-   `email`/`state_dir` from `config.json` and writes `<state_dir>/master_token`
-   (mode `0600`). Pass `--print` to use the `KEEP_MASTER_TOKEN` env var instead.
+   `email`/`state_dir` from `config.json` and saves the master token to the OS
+   keychain (or `<state_dir>/master_token`, mode `0600`, if there isn't one).
+   Pass `--print` to use the `KEEP_MASTER_TOKEN` env var instead.
 
 After the first successful run the daemon caches Google's sync cursor in
 `<state_dir>/google_sync_cache.json`, which reduces (not eliminates) suspicious-login

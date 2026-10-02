@@ -11,8 +11,8 @@ this script needs.
 Email and state_dir default to whatever's in config.json (next to this
 script), so the only thing you need to paste is the OAuth Token. The
 resulting master token grants full account access, same as a password —
-it's written straight to <state_dir>/master_token (0600) rather than
-printed, unless you pass --print.
+it's saved straight to the OS keychain (or <state_dir>/master_token, 0600,
+when there isn't one) rather than printed, unless you pass --print.
 
 On Windows, keep_sync_tray.py wraps this same exchange in a GUI so you
 never have to touch a terminal.
@@ -77,9 +77,9 @@ def main() -> int:
         print(str(e), file=sys.stderr)
         return 1
 
-    token_path = core.save_master_token(state_dir, master_token)
+    where = core.save_master_token(state_dir, master_token)
 
-    print(f"\nMaster token saved to {token_path} (0600).")
+    print(f"\nMaster token saved to {where}.")
     if args.do_print:
         print("\nMaster token:")
         print(master_token)

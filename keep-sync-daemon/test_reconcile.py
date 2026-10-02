@@ -8,8 +8,13 @@ no network, no real SP app).
 """
 from __future__ import annotations
 
+import os
 import unittest
 import unittest.mock
+
+# Never touch the real OS keychain from tests; KeychainSecretTests below
+# patches in a fake one where it matters.
+os.environ["PYTHON_KEYRING_BACKEND"] = "keyring.backends.null.Keyring"
 
 import gkeepapi.node
 
@@ -689,6 +694,109 @@ class LoadConfigTagMigrationTests(unittest.TestCase):
         cfg = core.load_config(self._write({"email": "a@b.com"}))
         self.assertEqual(cfg["sp_project_title"], "")
         self.assertEqual(cfg["sp_new_task_tag_titles"], [])
+
+
+class FakeKeyring:
+    """Stands in for the `keyring` module: an in-memory keychain."""
+
+    class errors:
+        class PasswordDeleteError(Exception):
+            pass
+
+    def __init__(self):
+        self.store = {}
+
+    def get_password(self, service, name):
+        return self.store.get((service, name))
+
+    def set_password(self, service, name, value):
+        self.store[(service, name)] = value
+
+    def delete_password(self, service, name):
+        if (service, name) not in self.store:
+            raise self.errors.PasswordDeleteError(name)
+        del self.store[(service, name)]
+
+
+class KeychainSecretTests(unittest.TestCase):
+    """Secrets move out of config.json / state_dir/master_token into the
+    keychain when there is one, and stay in the files when there isn't."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.dir, ignore_errors=True))
+        self.config_path = self.dir / "config.json"
+        self.kr = FakeKeyring()
+        patcher = unittest.mock.patch.object(core, "_keyring", lambda: self.kr)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        env = unittest.mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("KEEP_MASTER_TOKEN", None)
+
+    def _file(self):
+        import json
+        return json.loads(self.config_path.read_text(encoding="utf-8"))
+
+    def _secret(self, name):
+        return self.kr.store.get((core.KEYRING_SERVICE, name))
+
+    def test_save_config_moves_secrets_to_keychain(self):
+        core.save_config(self.config_path, {
+            "email": "a@b.com", "sp_access_token": "sp-tok", "anthropic_api_key": "sk-1",
+        })
+        self.assertEqual(self._file()["sp_access_token"], "")
+        self.assertEqual(self._file()["anthropic_api_key"], "")
+        self.assertEqual(self._secret("sp_access_token"), "sp-tok")
+        self.assertEqual(self._secret("anthropic_api_key"), "sk-1")
+        cfg = core.load_config(self.config_path)
+        self.assertEqual(cfg["sp_access_token"], "sp-tok")
+        self.assertEqual(cfg["anthropic_api_key"], "sk-1")
+
+    def test_load_config_migrates_plaintext_secret(self):
+        import json
+        self.kr.set_password(core.KEYRING_SERVICE, "sp_access_token", "stale")
+        self.config_path.write_text(json.dumps(
+            {"email": "a@b.com", "sp_access_token": "from-file"}), encoding="utf-8")
+        cfg = core.load_config(self.config_path)
+        self.assertEqual(cfg["sp_access_token"], "from-file")
+        self.assertEqual(self._secret("sp_access_token"), "from-file")
+        self.assertEqual(self._file()["sp_access_token"], "")
+
+    def test_clearing_a_secret_deletes_it_from_keychain(self):
+        core.save_config(self.config_path, {"email": "a@b.com", "anthropic_api_key": "sk-1"})
+        core.save_config(self.config_path, {"email": "a@b.com", "anthropic_api_key": ""})
+        self.assertIsNone(self._secret("anthropic_api_key"))
+
+    def test_no_keychain_keeps_secrets_in_file(self):
+        with unittest.mock.patch.object(core, "_keyring", lambda: None):
+            core.save_config(self.config_path, {"email": "a@b.com", "sp_access_token": "sp-tok"})
+            self.assertEqual(self._file()["sp_access_token"], "sp-tok")
+            self.assertEqual(core.load_config(self.config_path)["sp_access_token"], "sp-tok")
+
+    def test_master_token_round_trip_via_keychain(self):
+        where = core.save_master_token(self.dir, "mt-1")
+        self.assertIn("keychain", where)
+        self.assertFalse((self.dir / "master_token").exists())
+        self.assertEqual(core.get_master_token(self.dir), "mt-1")
+        self.assertTrue(core.has_master_token(self.dir))
+
+    def test_master_token_file_migrates_into_keychain(self):
+        (self.dir / "master_token").write_text("mt-file\n", encoding="utf-8")
+        self.assertEqual(core.get_master_token(self.dir), "mt-file")
+        self.assertFalse((self.dir / "master_token").exists())
+        self.assertEqual(self._secret(core.MASTER_TOKEN_SECRET), "mt-file")
+
+    def test_master_token_without_keychain_uses_file(self):
+        with unittest.mock.patch.object(core, "_keyring", lambda: None):
+            self.assertFalse(core.has_master_token(self.dir))
+            core.save_master_token(self.dir, "mt-1")
+            self.assertEqual((self.dir / "master_token").read_text(encoding="utf-8"), "mt-1")
+            self.assertEqual(core.get_master_token(self.dir), "mt-1")
 
 
 class CheckForUpdateTests(unittest.TestCase):

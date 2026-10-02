@@ -103,7 +103,7 @@ def needs_setup(cfg: dict) -> bool:
     if not (cfg.get("sp_access_token") and cfg.get("sp_project_id") and cfg.get("keep_note_title")):
         return True
     state_dir = core.resolve_state_dir(cfg.get("state_dir", core.DEFAULT_STATE_DIR))
-    return not (state_dir / "master_token").exists()
+    return not core.has_master_token(state_dir)
 
 
 def set_run_at_startup(enable: bool) -> None:
