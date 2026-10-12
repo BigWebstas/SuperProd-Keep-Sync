@@ -746,7 +746,18 @@ def ai_merchant_prefix(
             },
             timeout=timeout,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            # Anthropic puts the actionable reason (e.g. "credit balance is
+            # too low") in the JSON body; raise_for_status() drops it.
+            try:
+                detail = ((resp.json() or {}).get("error") or {}).get("message")
+            except ValueError:
+                detail = None
+            log.error(
+                "AI merchant-rename: Anthropic API returned %s: %s",
+                resp.status_code, detail or resp.text[:200] or resp.reason,
+            )
+            return None
         blocks = (resp.json() or {}).get("content") or []
         reply = (blocks[0].get("text") if blocks else "") or ""
         reply = reply.strip()
