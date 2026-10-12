@@ -1228,6 +1228,19 @@ class ReconcileAiRenameTests(unittest.TestCase):
         self.assertTrue(res.keep_dirty)
         self.assertEqual(record[note.items[0].id]["result"], "renamed")
 
+    def test_new_sp_task_is_renamed_on_both_sides(self):
+        # The reported bug: tasks typed in SP ("tylenol from costco") never
+        # went through the rename, only Keep-originated items did.
+        note, _ = make_list(items=[])
+        sp = FakeSP([sp_client.SPTask("sp1", "tylenol from costco", False, None, "p1")])
+        record = {}
+        with unittest.mock.patch.object(core, "ai_merchant_prefix", return_value="Costco - Tylenol"):
+            res = core.reconcile_sp(self._cfg(), FakeKeep([note]), sp, {}, record)
+        self.assertEqual(note.items[0].text, "Costco - Tylenol")
+        self.assertEqual(sp.tasks["sp1"].title, "Costco - Tylenol")
+        self.assertEqual(res.created_keep, 1)
+        self.assertEqual(record[note.items[0].id]["result"], "renamed")
+
     def test_no_merchant_found_leaves_title_alone_but_records_the_miss(self):
         note, _ = make_list(items=[("mow the lawn", False)])
         sp = FakeSP()

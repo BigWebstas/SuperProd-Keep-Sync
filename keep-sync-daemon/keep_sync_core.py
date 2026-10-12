@@ -1309,6 +1309,26 @@ def reconcile_sp(
     ai_rename_api_key = get_anthropic_api_key(cfg) if ai_rename_enabled else ""
     ai_rename_model = (cfg.get("ai_merchant_rename_model") or "").strip() or None
 
+    def ai_rename(item_id: str, title: str) -> str:
+        """`title` rewritten to "Merchant - Item" if the feature is on, this
+        item hasn't been looked at yet, and a merchant is found; else
+        `title` unchanged. Records the outcome so it's a one-shot per item."""
+        if not (
+            ai_rename_enabled and ai_rename_api_key
+            and item_id not in ai_rename_record
+            and not looks_already_prefixed(title)
+        ):
+            return title
+        renamed = ai_merchant_prefix(title, ai_rename_api_key, ai_rename_model)
+        ai_rename_record[item_id] = {
+            "result": "renamed" if renamed else "no_merchant",
+            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        if renamed:
+            log.info("AI merchant-rename: %r -> %r", title, renamed)
+            return renamed
+        return title
+
     note = find_keep_list(keep, note_title, cfg.get("include_archived", False))
     if note is None:
         raise LookupError(
@@ -1356,22 +1376,10 @@ def reconcile_sp(
             entry["text"] = item.text
             entry["checked"] = bool(item.checked)
         else:
-            title = item.text
-            if (
-                ai_rename_enabled and ai_rename_api_key
-                and item.id not in ai_rename_record
-                and not looks_already_prefixed(title)
-            ):
-                renamed = ai_merchant_prefix(title, ai_rename_api_key, ai_rename_model)
-                ai_rename_record[item.id] = {
-                    "result": "renamed" if renamed else "no_merchant",
-                    "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                }
-                if renamed:
-                    log.info("AI merchant-rename: %r -> %r", title, renamed)
-                    title = renamed
-                    item.text = renamed  # keep both sides showing the same title
-                    res.keep_dirty = True
+            title = ai_rename(item.id, item.text)
+            if title != item.text:
+                item.text = title  # keep both sides showing the same title
+                res.keep_dirty = True
             task_id = sp.add_task(
                 title, project_id, bool(item.checked),
                 tag_ids=new_task_tag_ids, time_estimate_ms=new_task_estimate_ms,
@@ -1409,9 +1417,14 @@ def reconcile_sp(
         if task.parent_id or task.id in mapped_task_ids:
             continue
         new_item = note.add(task.title, bool(task.is_done))
+        title = ai_rename(new_item.id, task.title)
+        if title != task.title:
+            new_item.text = title
+            sp.update_task(task.id, {"title": title})
+            res.updated_sp += 1
         note_map[new_item.id] = {
             "taskId": task.id,
-            "text": task.title,
+            "text": title,
             "checked": bool(task.is_done),
         }
         res.new_keep_item_ids.append(new_item.id)
