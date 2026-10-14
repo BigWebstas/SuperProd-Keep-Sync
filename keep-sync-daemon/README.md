@@ -35,7 +35,10 @@ is a list of SP tag ids (from `GET /tags`) to put on those same tasks;
 `anthropic_api_key` (or the `ANTHROPIC_API_KEY` env var) rewrites a freely-dictated
 new item like "from walmart add toilet tablets" to "Walmart - Toilet tablets"
 via Claude before creating its SP task — one API call per item, ever, tracked in
-`<state_dir>/ai_renamed.json`.
+`<state_dir>/ai_renamed.json`; `ai_price_lookup_enabled` (same API key) appends the best
+current price to unchecked, purchasable items via Claude + web search —
+"Milk 1 gal" becomes "Milk 1 gal - $3.49 @ Walmart" in Keep and SP. One lookup per
+item, ever (`<state_dir>/ai_priced.json`), at most 5 per sync pass.
 
 Secrets (`sp_access_token`, `anthropic_api_key`, the Keep master token) are moved
 into the OS keychain — Windows Credential Manager, or Secret Service/KWallet on

@@ -84,6 +84,7 @@ def default_config() -> dict:
         "keep_note_title": "",
         "keep_sort_alphabetically": False,
         "ai_merchant_rename_enabled": False,
+        "ai_price_lookup_enabled": False,
         "anthropic_api_key": "",
     }
 
@@ -269,10 +270,17 @@ class SetupDialog(QDialog):
         layout.addWidget(self.ai_rename_check, row, 0, 1, 2)
         row += 1
 
+        self.ai_price_check = QCheckBox(
+            "Use AI to append the best price to unchecked items (e.g. \"Milk - $3.49 @ Walmart\")"
+        )
+        self.ai_price_check.setChecked(bool(self.cfg.get("ai_price_lookup_enabled", False)))
+        layout.addWidget(self.ai_price_check, row, 0, 1, 2)
+        row += 1
+
         layout.addWidget(QLabel("Anthropic API Key:"), row, 0)
         self.anthropic_key_edit = QLineEdit(self.cfg.get("anthropic_api_key", ""))
         self.anthropic_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.anthropic_key_edit.setPlaceholderText("required for the AI rename above; console.anthropic.com")
+        self.anthropic_key_edit.setPlaceholderText("required for the AI options above; console.anthropic.com")
         layout.addWidget(self.anthropic_key_edit, row, 1)
         row += 1
 
@@ -398,6 +406,7 @@ class SetupDialog(QDialog):
             keep_note_title=note_title,
             keep_sort_alphabetically=self.sort_check.isChecked(),
             ai_merchant_rename_enabled=self.ai_rename_check.isChecked(),
+            ai_price_lookup_enabled=self.ai_price_check.isChecked(),
             anthropic_api_key=self.anthropic_key_edit.text().strip(),
         )
         core.save_config(CONFIG_PATH, self.cfg)
