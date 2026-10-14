@@ -631,6 +631,7 @@ def load_config(config_path: Path) -> dict:
     cfg.setdefault("keep_note_title", "")
     cfg.setdefault("keep_sort_alphabetically", False)
     cfg.setdefault("ai_merchant_rename_enabled", False)
+    cfg.setdefault("ai_price_lookup_enabled", False)
     cfg.setdefault("anthropic_api_key", "")
     cfg.setdefault("ai_merchant_rename_model", "")
 
@@ -767,6 +768,99 @@ def ai_merchant_prefix(
     if not reply or reply.upper() == "NONE":
         return None
     return reply
+
+
+# --- AI price lookup ----------------------------------------------------------
+#
+# Optional: an unchecked, purchasable item gets the best current price and
+# store appended -- "Milk 1 gal" -> "Milk 1 gal - $3.49 @ Walmart" -- using
+# Claude with web search (same format as keep-organizer). Like the rename,
+# one-shot per item id (see ai_price_record), and capped per pass because each
+# lookup is a slow web-search round trip and the whole sync runs under a
+# worker timeout.
+
+PRICE_LOOKUPS_PER_PASS = 5
+_PRICE_LOOKUP_TIMEOUT = 40.0
+_PRICE_SYSTEM_PROMPT = (
+    "You help with a shopping checklist. Given one checklist entry, decide if it is a "
+    "physical product someone would buy (not a task, reminder, or note). If it is, "
+    "use web search to find the lowest current price from a reputable online or "
+    "major local retailer for that item in the stated quantity. Reply with ONLY a "
+    'JSON object: {"purchasable": true|false, "price": <number or null>, '
+    '"store": <string or null>}. Use null price/store when purchasable but no '
+    "trustworthy price was found."
+)
+_PRICE_SUFFIX_RE = re.compile(r"\s+-\s+\$\d[\d,]*(?:\.\d{2})?\s+@\s+.+$")
+
+
+def has_price(text: str) -> bool:
+    return bool(_PRICE_SUFFIX_RE.search(text or ""))
+
+
+def _parse_price_reply(reply: str) -> "dict | None":
+    """The JSON verdict in Claude's reply, validated, or None if unusable."""
+    m = re.search(r"\{.*\}", reply, re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("purchasable"), bool):
+        return None
+    price, store = data.get("price"), data.get("store")
+    if price is not None and (isinstance(price, bool) or not isinstance(price, (int, float)) or price <= 0):
+        return None
+    if price is not None and not (isinstance(store, str) and store.strip()):
+        return None
+    return {"purchasable": data["purchasable"], "price": price, "store": store}
+
+
+def ai_price_lookup(
+    text: str, api_key: str, model: "str | None" = None, timeout: float = _PRICE_LOOKUP_TIMEOUT,
+) -> "dict | None":
+    """{"purchasable", "price", "store"} for `text`, or None when the lookup
+    itself failed (bad key, network, unparseable reply) so the caller retries
+    next pass instead of recording a verdict. Never raises."""
+    log = logging.getLogger(LOGGER_NAME)
+    if not text.strip() or not api_key:
+        return None
+    try:
+        resp = requests.post(
+            ANTHROPIC_MESSAGES_URL,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model or DEFAULT_AI_RENAME_MODEL,
+                "max_tokens": 1024,
+                "system": _PRICE_SYSTEM_PROMPT,
+                "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+                "messages": [{"role": "user", "content": text}],
+            },
+            timeout=timeout,
+        )
+        if not resp.ok:
+            try:
+                detail = ((resp.json() or {}).get("error") or {}).get("message")
+            except ValueError:
+                detail = None
+            log.error(
+                "AI price lookup: Anthropic API returned %s: %s",
+                resp.status_code, detail or resp.text[:200] or resp.reason,
+            )
+            return None
+        # Search results interleave with text; the verdict is the last text block.
+        texts = [b.get("text", "") for b in (resp.json() or {}).get("content") or [] if b.get("type") == "text"]
+    except Exception:
+        log.warning("AI price lookup call failed", exc_info=True)
+        return None
+    result = _parse_price_reply(texts[-1] if texts else "")
+    if result is None:
+        log.warning("AI price lookup: unparseable reply for %r", text)
+    return result
 
 
 def atomic_write_json(path: Path, data: dict, mode: int = 0o600, indent: "int | None" = 2) -> None:
@@ -1031,10 +1125,11 @@ def save_item_map(item_map_path: Path, item_map: dict) -> None:
 
 
 def load_ai_rename_record(path: Path) -> dict:
-    """Which Keep item ids the AI merchant-prefix step has already looked
-    at, keyed by item id -> {"result": "renamed"|"no_merchant", "at": iso}.
-    Recording a miss (no merchant found) too is what makes this a one-shot
-    cost per item rather than an API call every pass forever."""
+    """Which Keep item ids an AI step has already looked at, keyed by item
+    id -> {"result": ..., "at": iso} ("renamed"|"no_merchant" for the
+    merchant-prefix rename, "priced"|"no_price" for the price lookup).
+    Recording a miss too is what makes this a one-shot cost per item rather
+    than an API call every pass forever."""
     if not path.exists():
         return {}
     try:
@@ -1272,7 +1367,7 @@ class ReconcileResult:
 
 def reconcile_sp(
     cfg: dict, keep: "gkeepapi.Keep", sp: "sp_client.SPClient", item_map: dict,
-    ai_rename_record: "dict | None" = None,
+    ai_rename_record: "dict | None" = None, ai_price_record: "dict | None" = None,
 ) -> ReconcileResult:
     """Reconciles one Keep checklist against one SP project through the
     Local REST API. Mutates `keep`'s in-memory graph (caller pushes with
@@ -1290,7 +1385,8 @@ def reconcile_sp(
     `ai_rename_record` (mutated in place like item_map, caller persists) is
     only consulted/used when both it and cfg['ai_merchant_rename_enabled']
     are truthy -- pass None to skip the feature entirely (e.g. in tests that
-    don't care about it)."""
+    don't care about it). `ai_price_record` works the same way for
+    cfg['ai_price_lookup_enabled']."""
     log = logging.getLogger(LOGGER_NAME)
     note_title = cfg.get("keep_note_title") or ""
     project_id = cfg.get("sp_project_id") or ""
@@ -1329,6 +1425,39 @@ def reconcile_sp(
             return renamed
         return title
 
+    # Optional: append "- $price @ store" to unchecked purchasable items.
+    # Runs after ai_rename (a priced title would look "already prefixed"),
+    # and only on items it hasn't looked at yet, up to a per-pass cap.
+    price_enabled = bool(cfg.get("ai_price_lookup_enabled")) and ai_price_record is not None
+    price_api_key = get_anthropic_api_key(cfg) if price_enabled else ""
+    price_lookups_left = PRICE_LOOKUPS_PER_PASS
+
+    def ai_price(item_id: str, title: str, checked: bool) -> str:
+        """`title` with " - $X.XX @ Store" appended if the feature is on, the
+        item is unchecked and unseen, and a trustworthy price is found; else
+        `title` unchanged. A failed lookup isn't recorded, so it's retried."""
+        nonlocal price_lookups_left
+        if not (
+            price_enabled and price_api_key and not checked
+            and item_id not in ai_price_record and price_lookups_left > 0
+            and title.strip() and not has_price(title)
+        ):
+            return title
+        price_lookups_left -= 1
+        result = ai_price_lookup(title.strip(), price_api_key)
+        if result is None:
+            return title
+        priced = result["purchasable"] and result["price"] is not None
+        ai_price_record[item_id] = {
+            "result": "priced" if priced else "no_price",
+            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        if not priced:
+            return title
+        new_title = f"{title.strip()} - ${result['price']:,.2f} @ {result['store'].strip()}"
+        log.info("AI price lookup: %r -> %r", title, new_title)
+        return new_title
+
     note = find_keep_list(keep, note_title, cfg.get("include_archived", False))
     if note is None:
         raise LookupError(
@@ -1355,6 +1484,10 @@ def reconcile_sp(
             continue
         entry = note_map.get(item.id)
         if entry and entry.get("taskId"):
+            priced_text = ai_price(item.id, item.text, bool(item.checked))
+            if priced_text != item.text:
+                item.text = priced_text  # the patch below carries it to SP
+                res.keep_dirty = True
             task = sp_tasks.get(entry["taskId"])
             patch = {}
             if entry.get("text") != item.text:
@@ -1376,7 +1509,7 @@ def reconcile_sp(
             entry["text"] = item.text
             entry["checked"] = bool(item.checked)
         else:
-            title = ai_rename(item.id, item.text)
+            title = ai_price(item.id, ai_rename(item.id, item.text), bool(item.checked))
             if title != item.text:
                 item.text = title  # keep both sides showing the same title
                 res.keep_dirty = True
@@ -1417,7 +1550,7 @@ def reconcile_sp(
         if task.parent_id or task.id in mapped_task_ids:
             continue
         new_item = note.add(task.title, bool(task.is_done))
-        title = ai_rename(new_item.id, task.title)
+        title = ai_price(new_item.id, ai_rename(new_item.id, task.title), bool(task.is_done))
         if title != task.title:
             new_item.text = title
             sp.update_task(task.id, {"title": title})
@@ -1538,6 +1671,7 @@ def _sync_once(cfg: dict) -> SyncResult:
     google_cache_path = state_dir / "google_sync_cache.json"
     item_map_path = state_dir / "item_map.json"
     ai_rename_path = state_dir / "ai_renamed.json"
+    ai_price_path = state_dir / "ai_priced.json"
     debug_path = state_dir / "last_sync.json"
 
     for field in ("sp_access_token", "sp_project_id", "keep_note_title"):
@@ -1559,6 +1693,7 @@ def _sync_once(cfg: dict) -> SyncResult:
     cached_state = load_google_state_cache(google_cache_path)
     item_map = load_item_map(item_map_path)
     ai_rename_record = load_ai_rename_record(ai_rename_path)
+    ai_price_record = load_ai_rename_record(ai_price_path)
 
     try:
         if cached_state:
@@ -1584,7 +1719,7 @@ def _sync_once(cfg: dict) -> SyncResult:
     _clear_sp_keep_alert(sp, cfg.get("sp_project_id", ""))
 
     try:
-        result = reconcile_sp(cfg, keep, sp, item_map, ai_rename_record)
+        result = reconcile_sp(cfg, keep, sp, item_map, ai_rename_record, ai_price_record)
     except LookupError as e:
         log.warning("reconcile aborted: %s", e)
         return SyncResult(False, str(e))
@@ -1637,6 +1772,10 @@ def _sync_once(cfg: dict) -> SyncResult:
         save_ai_rename_record(ai_rename_path, ai_rename_record)
     except OSError:
         log.warning("failed to write %s", ai_rename_path, exc_info=True)
+    try:
+        save_ai_rename_record(ai_price_path, ai_price_record)
+    except OSError:
+        log.warning("failed to write %s", ai_price_path, exc_info=True)
 
     if push_error is not None:
         return SyncResult(

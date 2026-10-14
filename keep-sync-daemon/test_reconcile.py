@@ -1336,5 +1336,117 @@ class LogTailerTests(unittest.TestCase):
         self.assertEqual(tailer.read_new(), "")
 
 
+class ReconcileAiPriceTests(unittest.TestCase):
+    """reconcile_sp's AI price-lookup integration: gated by config +
+    ai_price_record being passed, one-shot per item id, capped per pass."""
+
+    PRICED = {"purchasable": True, "price": 3.49, "store": "Walmart"}
+
+    def _cfg(self, enabled=True):
+        c = cfg()
+        c["ai_price_lookup_enabled"] = enabled
+        c["anthropic_api_key"] = "test-key"
+        return c
+
+    def _run(self, note, sp, record, enabled=True, item_map=None, **kw):
+        with unittest.mock.patch.object(core, "ai_price_lookup", **kw) as m:
+            res = core.reconcile_sp(self._cfg(enabled), FakeKeep([note]), sp, item_map or {}, None, record)
+        return res, m
+
+    def test_disabled_never_looks_up(self):
+        note, _ = make_list(items=[("Milk", False)])
+        _, m = self._run(note, FakeSP(), {}, enabled=False, return_value=self.PRICED)
+        m.assert_not_called()
+        self.assertEqual(note.items[0].text, "Milk")
+
+    def test_new_keep_item_priced_on_both_sides(self):
+        note, _ = make_list(items=[("Milk", False)])
+        sp = FakeSP()
+        record = {}
+        res, _ = self._run(note, sp, record, return_value=self.PRICED)
+        self.assertEqual(note.items[0].text, "Milk - $3.49 @ Walmart")
+        self.assertEqual(next(iter(sp.tasks.values())).title, "Milk - $3.49 @ Walmart")
+        self.assertTrue(res.keep_dirty)
+        self.assertEqual(record[note.items[0].id]["result"], "priced")
+
+    def test_already_mapped_item_is_priced_and_pushed_to_sp(self):
+        note, _ = make_list(items=[("Milk", False)])
+        sp = FakeSP()
+        item_map = {}
+        core.reconcile_sp(cfg(), FakeKeep([note]), sp, item_map)  # sync once, feature off
+        record = {}
+        res, _ = self._run(note, sp, record, item_map=item_map, return_value=self.PRICED)
+        self.assertEqual(note.items[0].text, "Milk - $3.49 @ Walmart")
+        self.assertEqual(next(iter(sp.tasks.values())).title, "Milk - $3.49 @ Walmart")
+        self.assertTrue(res.keep_dirty)
+
+    def test_new_sp_task_is_priced_on_both_sides(self):
+        note, _ = make_list(items=[])
+        sp = FakeSP([sp_client.SPTask("sp1", "Milk", False, None, "p1")])
+        self._run(note, sp, {}, return_value=self.PRICED)
+        self.assertEqual(note.items[0].text, "Milk - $3.49 @ Walmart")
+        self.assertEqual(sp.tasks["sp1"].title, "Milk - $3.49 @ Walmart")
+
+    def test_checked_and_already_priced_items_are_skipped(self):
+        note, _ = make_list(items=[("Eggs", True), ("Milk - $3.49 @ Walmart", False)])
+        _, m = self._run(note, FakeSP(), {}, return_value=self.PRICED)
+        m.assert_not_called()
+
+    def test_not_purchasable_is_recorded_and_not_asked_again(self):
+        note, _ = make_list(items=[("Call mom", False)])
+        record = {}
+        verdict = {"purchasable": False, "price": None, "store": None}
+        res, _ = self._run(note, FakeSP(), record, return_value=verdict)
+        self.assertEqual(note.items[0].text, "Call mom")
+        self.assertFalse(res.keep_dirty)
+        self.assertEqual(record[note.items[0].id]["result"], "no_price")
+        _, m = self._run(note, FakeSP(), record, return_value=verdict)
+        m.assert_not_called()
+
+    def test_failed_lookup_is_not_recorded_so_it_retries(self):
+        note, _ = make_list(items=[("Milk", False)])
+        record = {}
+        self._run(note, FakeSP(), record, return_value=None)
+        self.assertEqual(record, {})
+        self.assertEqual(note.items[0].text, "Milk")
+
+    def test_lookups_are_capped_per_pass(self):
+        n = core.PRICE_LOOKUPS_PER_PASS
+        note, _ = make_list(items=[(f"Item {i}", False) for i in range(n + 2)])
+        _, m = self._run(note, FakeSP(), {}, return_value=self.PRICED)
+        self.assertEqual(m.call_count, n)
+
+    def test_rename_runs_before_price_so_the_price_does_not_block_it(self):
+        note, _ = make_list(items=[("from walmart add milk", False)])
+        c = self._cfg()
+        c["ai_merchant_rename_enabled"] = True
+        with unittest.mock.patch.object(core, "ai_merchant_prefix", return_value="Walmart - Milk"), \
+                unittest.mock.patch.object(core, "ai_price_lookup", return_value=self.PRICED):
+            core.reconcile_sp(c, FakeKeep([note]), FakeSP(), {}, {}, {})
+        self.assertEqual(note.items[0].text, "Walmart - Milk - $3.49 @ Walmart")
+
+
+class AiPriceLookupTests(unittest.TestCase):
+    def _post(self, texts, ok=True):
+        resp = unittest.mock.Mock(ok=ok, status_code=200 if ok else 400, reason="Bad", text="")
+        resp.json.return_value = {"content": [{"type": "web_search_tool_result"}] + [{"type": "text", "text": t} for t in texts]}
+        return unittest.mock.patch.object(core.requests, "post", return_value=resp)
+
+    def test_parses_verdict_from_last_text_block(self):
+        with self._post(["searching...", 'Result: {"purchasable": true, "price": 3.49, "store": "Walmart"}']):
+            self.assertEqual(
+                core.ai_price_lookup("Milk", "key"), {"purchasable": True, "price": 3.49, "store": "Walmart"})
+
+    def test_price_without_store_is_unusable(self):
+        with self._post(['{"purchasable": true, "price": 3.49, "store": null}']):
+            self.assertIsNone(core.ai_price_lookup("Milk", "key"))
+
+    def test_api_error_and_empty_input_return_none(self):
+        with self._post([], ok=False):
+            self.assertIsNone(core.ai_price_lookup("Milk", "key"))
+        self.assertIsNone(core.ai_price_lookup("  ", "key"))
+        self.assertIsNone(core.ai_price_lookup("Milk", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
