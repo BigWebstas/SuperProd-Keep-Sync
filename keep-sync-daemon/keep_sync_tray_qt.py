@@ -699,6 +699,7 @@ class TrayApp(QObject):
         ts = time.strftime("%H:%M:%S")
         text = f"{'OK' if result.ok else 'error'} @ {ts}: {result.message}"
         self.status = text
+        core.HEALTH.record(result, self._interval_minutes())
         self.status_changed.emit(text)
         log.info("sync run done in %.1fs: ok=%s %s", elapsed, result.ok, result.message)
         if not result.ok:
@@ -853,6 +854,9 @@ class TrayApp(QObject):
     def stop_scheduler(self) -> None:
         self.stop_event.set()
 
+    def _interval_minutes(self) -> int:
+        return max(1, int(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES)))
+
     def _scheduler_loop(self) -> None:
         while not self.stop_event.is_set():
             try:
@@ -861,7 +865,7 @@ class TrayApp(QObject):
                 # A single bad sync (e.g. one malformed Keep item) must not
                 # permanently kill background syncing for every other note.
                 log.exception("sync raised unexpectedly; will retry next interval")
-            interval_minutes = max(1, int(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES)))
+            interval_minutes = self._interval_minutes()
             log.debug("scheduler sleeping %d min until next sync", interval_minutes)
             self.stop_event.wait(interval_minutes * 60)
         log.info("scheduler loop stopped")
@@ -928,6 +932,7 @@ def main() -> int:
             log.info("setup dialog closed without finishing; exiting")
             return 0  # user closed setup without finishing
 
+    core.start_status_server(cfg.get("status_port", core.DEFAULT_STATUS_PORT))
     tray = TrayApp(cfg)
     tray.show()
     exit_code = app.exec()

@@ -32,8 +32,11 @@ import signal
 import stat
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import gkeepapi
@@ -602,6 +605,7 @@ def relaunch_after_crash(logger) -> bool:
 DEFAULT_ANDROID_ID = "0000000000000000"
 DEFAULT_STATE_DIR = "~/.sp-keep-sync"
 DEFAULT_SYNC_INTERVAL_MINUTES = 5
+DEFAULT_STATUS_PORT = 47615  # localhost health endpoint; 0 in config disables it
 DEFAULT_SP_API_BASE_URL = sp_client.DEFAULT_BASE_URL
 
 
@@ -617,6 +621,7 @@ def load_config(config_path: Path) -> dict:
     cfg.setdefault("state_dir", DEFAULT_STATE_DIR)
     cfg.setdefault("include_archived", False)
     cfg.setdefault("sync_interval_minutes", DEFAULT_SYNC_INTERVAL_MINUTES)
+    cfg.setdefault("status_port", DEFAULT_STATUS_PORT)
     cfg.setdefault("sp_api_base_url", DEFAULT_SP_API_BASE_URL)
     cfg.setdefault("sp_access_token", "")
     cfg.setdefault("sp_project_id", "")
@@ -1587,6 +1592,93 @@ class SyncResult:
     ok: bool
     message: str
     notes_count: int = 0  # kept name for the tray apps; now = number of items changed
+
+
+# --- health endpoint ---------------------------------------------------------
+# The tray apps are windowless, so "is it still syncing?" has no visible
+# answer. They record every pass into HEALTH and expose it as JSON on
+# 127.0.0.1 for a poller (curl, uptime monitor, systemd watchdog script).
+# A process that crashed or hung simply doesn't answer, and a hung
+# scheduler shows up as "stale" because the last pass is too old.
+
+STALE_AFTER_INTERVALS = 2  # missed passes before "stale"...
+STALE_GRACE_SEC = 300  # ...plus room for a slow pass (worker timeout is 300s)
+
+
+class HealthState:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._started = time.time()
+        self._last: "dict | None" = None
+        self._interval_sec = DEFAULT_SYNC_INTERVAL_MINUTES * 60
+
+    def record(self, result: "SyncResult", interval_minutes: int) -> None:
+        with self._lock:
+            self._interval_sec = interval_minutes * 60
+            self._last = {"at": time.time(), "ok": result.ok, "message": result.message}
+
+    def snapshot(self, now: "float | None" = None) -> dict:
+        """status is one of starting | ok | error | stale; the endpoint maps
+        starting/ok to HTTP 200 and error/stale to 503."""
+        now = time.time() if now is None else now
+        with self._lock:
+            last, interval = self._last, self._interval_sec
+        limit = interval * STALE_AFTER_INTERVALS + STALE_GRACE_SEC
+        if last is None:
+            status = "starting" if now - self._started <= limit else "stale"
+        elif now - last["at"] > limit:
+            status = "stale"
+        else:
+            status = "ok" if last["ok"] else "error"
+        return {
+            "status": status,
+            "version": get_version(),
+            "pid": os.getpid(),
+            "uptime_sec": int(now - self._started),
+            "last_sync": None if last is None else {
+                "at": datetime.fromtimestamp(last["at"], timezone.utc).isoformat(timespec="seconds"),
+                "age_sec": int(now - last["at"]),
+                "ok": last["ok"],
+                "message": last["message"],
+            },
+        }
+
+
+HEALTH = HealthState()
+
+
+class _StatusHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.split("?", 1)[0] not in ("/", "/status"):
+            self.send_error(404)
+            return
+        snap = HEALTH.snapshot()
+        body = json.dumps(snap).encode("utf-8")
+        self.send_response(200 if snap["status"] in ("ok", "starting") else 503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # keep per-request noise out of the app log
+        pass
+
+
+def start_status_server(port: int) -> "ThreadingHTTPServer | None":
+    """Serve HEALTH on 127.0.0.1:<port> from a daemon thread. port 0
+    disables it. A busy port is logged, never fatal -- the status endpoint
+    must not be what stops a sync app from starting."""
+    log = logging.getLogger(LOGGER_NAME)
+    if not port:
+        return None
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", int(port)), _StatusHandler)
+    except (OSError, ValueError, OverflowError):
+        log.warning("status endpoint not started on port %r", port, exc_info=True)
+        return None
+    threading.Thread(target=server.serve_forever, daemon=True, name="status-server").start()
+    log.info("status endpoint on http://127.0.0.1:%d/status", server.server_address[1])
+    return server
 
 
 # A stale/revoked master token or a network outage silences the sync

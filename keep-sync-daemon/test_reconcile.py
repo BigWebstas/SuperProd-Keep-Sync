@@ -8,7 +8,9 @@ no network, no real SP app).
 """
 from __future__ import annotations
 
+import json
 import os
+import threading
 import unittest
 import unittest.mock
 
@@ -1446,6 +1448,50 @@ class AiPriceLookupTests(unittest.TestCase):
             self.assertIsNone(core.ai_price_lookup("Milk", "key"))
         self.assertIsNone(core.ai_price_lookup("  ", "key"))
         self.assertIsNone(core.ai_price_lookup("Milk", ""))
+
+
+class HealthEndpointTests(unittest.TestCase):
+    def test_status_lifecycle(self):
+        h = core.HealthState()
+        t0 = h._started
+        self.assertEqual(h.snapshot(t0 + 10)["status"], "starting")
+        h.record(core.SyncResult(True, "fine"), 5)
+        at = h._last["at"]
+        self.assertEqual(h.snapshot(at + 10)["status"], "ok")
+        h.record(core.SyncResult(False, "SP closed"), 5)
+        snap = h.snapshot(h._last["at"] + 10)
+        self.assertEqual((snap["status"], snap["last_sync"]["message"]), ("error", "SP closed"))
+        # 5-min interval: stale after 2*300 + 300 grace seconds without a pass
+        self.assertEqual(h.snapshot(h._last["at"] + 901)["status"], "stale")
+
+    def test_never_synced_goes_stale(self):
+        h = core.HealthState()
+        self.assertEqual(h.snapshot(h._started + 901)["status"], "stale")
+
+    def test_http_codes(self):
+        import urllib.error
+        import urllib.request
+        server = core.ThreadingHTTPServer(("127.0.0.1", 0), core._StatusHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        saved = core.HEALTH
+        self.addCleanup(setattr, core, "HEALTH", saved)
+        core.HEALTH = core.HealthState()
+        core.HEALTH.record(core.SyncResult(True, "ok"), 5)
+        with urllib.request.urlopen(base + "/status") as r:
+            self.assertEqual(r.status, 200)
+            self.assertEqual(json.loads(r.read())["status"], "ok")
+        core.HEALTH.record(core.SyncResult(False, "boom"), 5)
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(base + "/")
+        self.assertEqual(cm.exception.code, 503)
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(base + "/nope")
+        self.assertEqual(cm.exception.code, 404)
+
+    def test_port_zero_disables(self):
+        self.assertIsNone(core.start_status_server(0))
 
 
 if __name__ == "__main__":

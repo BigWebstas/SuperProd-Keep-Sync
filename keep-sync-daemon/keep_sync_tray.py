@@ -695,6 +695,9 @@ class TrayApp:
         self.status = text
         self.icon.title = f"{APP_NAME} — {text}"[:127]  # Windows tooltip length limit
 
+    def _interval_minutes(self) -> int:
+        return max(1, int(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES)))
+
     @core.log_callback_errors("sync run")
     def _run_sync(self) -> None:
         start = time.monotonic()
@@ -702,6 +705,7 @@ class TrayApp:
         result = core.sync_once_isolated(self.cfg)
         elapsed = time.monotonic() - start
         ts = time.strftime("%H:%M:%S")
+        core.HEALTH.record(result, self._interval_minutes())
         self._set_status(f"{'OK' if result.ok else 'error'} @ {ts}: {result.message}")
         log.info("sync run done in %.1fs: ok=%s %s", elapsed, result.ok, result.message)
         if not result.ok:
@@ -900,7 +904,7 @@ class TrayApp:
                 # A single bad sync (e.g. one malformed Keep item) must not
                 # permanently kill background syncing for every other note.
                 log.exception("sync raised unexpectedly; will retry next interval")
-            interval_minutes = max(1, int(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES)))
+            interval_minutes = self._interval_minutes()
             log.debug("scheduler sleeping %d min until next sync", interval_minutes)
             self.stop_event.wait(interval_minutes * 60)
         log.info("scheduler loop stopped")
@@ -969,6 +973,7 @@ def main() -> int:
         getattr(sys, "frozen", False), APP_DIR, sys.platform,
     )
     cfg = load_or_default_config()
+    core.start_status_server(cfg.get("status_port", core.DEFAULT_STATUS_PORT))
     force_setup = False
 
     while True:

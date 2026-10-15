@@ -151,6 +151,27 @@ crash.
 | `keep_sync_tray_qt.py` / `keep_sync_tray.py` | next to the binary, e.g. `keep_sync_tray_qt.log` (falls back to `<state_dir>/` then the temp dir if that folder is read-only — the startup line names the path it chose) |
 | `keep_sync_daemon.py` | `<state_dir>/keep_sync_daemon.log` |
 
+### Health endpoint
+
+The tray apps serve their status as JSON on `http://127.0.0.1:47615/status`
+(localhost only; change the port with `status_port` in `config.json`, `0`
+turns it off). Poll it from curl, an uptime monitor or a script:
+
+```sh
+curl -fs http://127.0.0.1:47615/status
+```
+
+| `status` | HTTP | Meaning |
+| --- | --- | --- |
+| `ok` | 200 | the last sync pass succeeded |
+| `starting` | 200 | no pass has finished yet |
+| `error` | 503 | the last pass failed (`last_sync.message` says why) |
+| `stale` | 503 | no pass for over 2 intervals + 5 min — the scheduler is stuck |
+
+No answer at all means the app is down. Python-level crashes already relaunch
+the app (up to 3 times a minute); a native crash or a hang does not, so for
+real supervision on Linux run it under systemd with `Restart=on-failure`.
+
 - `KEEP_SYNC_DEBUG=1` in the environment switches the log to DEBUG detail.
 - `KEEP_SYNC_NO_GOOGLE_CACHE=1` turns off the `google_sync_cache.json` optimisation
   entirely (use if that file is implicated in a crash; costs more frequent Google
