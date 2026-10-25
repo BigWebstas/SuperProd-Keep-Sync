@@ -176,6 +176,7 @@ class SPClient:
         tag_ids: "list[str] | None" = None,
         time_estimate_ms: "int | None" = None,
         notes: "str | None" = None,
+        priority: "str | None" = None,
     ) -> str:
         payload = {"title": title, "projectId": project_id, "isDone": bool(is_done)}
         if tag_ids:
@@ -184,6 +185,8 @@ class SPClient:
             payload["timeEstimate"] = int(time_estimate_ms)
         if notes:
             payload["notes"] = notes
+        if priority:
+            payload["priority"] = priority
         data = self._request("POST", "/tasks", json=payload)
         if isinstance(data, str):
             return data

@@ -633,6 +633,7 @@ def load_config(config_path: Path) -> dict:
     cfg.setdefault("sp_new_task_tag_ids", [])
     cfg.setdefault("sp_new_task_tag_titles", [])
     cfg.setdefault("sp_default_task_minutes", 0)
+    cfg.setdefault("sp_default_task_priority", "")
     cfg.setdefault("keep_note_title", "")
     cfg.setdefault("keep_sort_alphabetically", False)
     cfg.setdefault("ai_merchant_rename_enabled", False)
@@ -671,6 +672,17 @@ def _default_task_estimate_ms(cfg: dict) -> "int | None":
     except (TypeError, ValueError):
         return None
     return minutes * 60_000 if minutes > 0 else None
+
+
+# SP's task `priority` values, lowest first; "" in config means "don't set".
+SP_PRIORITIES = ("low", "medium", "high")
+
+
+def _default_task_priority(cfg: dict) -> "str | None":
+    """Config's `sp_default_task_priority` if it is one of SP_PRIORITIES, else
+    None. Like the estimate, SP only takes it at task creation."""
+    value = str(cfg.get("sp_default_task_priority") or "").strip().lower()
+    return value if value in SP_PRIORITIES else None
 
 
 # --- AI merchant-prefix rename ------------------------------------------------
@@ -1403,6 +1415,9 @@ def reconcile_sp(
     # estimate (SP's `timeEstimate`). Like tags, SP's REST API only accepts
     # this at creation, so existing tasks are never touched.
     new_task_estimate_ms = _default_task_estimate_ms(cfg)
+    # Optional: give every task created from a Keep item a default priority
+    # (SP's `priority`); creation-only like the estimate and tags.
+    new_task_priority = _default_task_priority(cfg)
     # Optional: rewrite a freely-dictated new item ("from walmart add toilet
     # tablets") to "Merchant - Item" before the SP task is created from it.
     # One API call per item, ever -- see ai_rename_record's docstring.
@@ -1521,6 +1536,7 @@ def reconcile_sp(
             task_id = sp.add_task(
                 title, project_id, bool(item.checked),
                 tag_ids=new_task_tag_ids, time_estimate_ms=new_task_estimate_ms,
+                priority=new_task_priority,
             )
             note_map[item.id] = {"taskId": task_id, "text": title, "checked": bool(item.checked)}
             res.created_sp += 1

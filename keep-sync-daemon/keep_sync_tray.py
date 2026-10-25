@@ -205,44 +205,51 @@ class SetupWindow(tk.Tk):
         self.estimate_var = tk.StringVar(value=str(self.cfg.get("sp_default_task_minutes", 0) or 0))
         tk.Entry(self, textvariable=self.estimate_var, width=8).grid(row=9, column=1, sticky="w", **pad)
 
-        tk.Label(self, text="Sync every (minutes):").grid(row=10, column=0, sticky="e", **pad)
+        tk.Label(self, text="Default task priority:").grid(row=10, column=0, sticky="e", **pad)
+        self.priority_var = tk.StringVar(value=self.cfg.get("sp_default_task_priority", "") or "none")
+        ttk.Combobox(
+            self, textvariable=self.priority_var, width=8, state="readonly",
+            values=("none",) + core.SP_PRIORITIES,
+        ).grid(row=10, column=1, sticky="w", **pad)
+
+        tk.Label(self, text="Sync every (minutes):").grid(row=11, column=0, sticky="e", **pad)
         self.interval_var = tk.StringVar(
             value=str(self.cfg.get("sync_interval_minutes", core.DEFAULT_SYNC_INTERVAL_MINUTES))
         )
-        tk.Entry(self, textvariable=self.interval_var, width=8).grid(row=10, column=1, sticky="w", **pad)
+        tk.Entry(self, textvariable=self.interval_var, width=8).grid(row=11, column=1, sticky="w", **pad)
 
         self.startup_var = tk.BooleanVar(value=self.cfg.get("run_at_startup", False))
         tk.Checkbutton(
             self, text="Start automatically when Windows starts", variable=self.startup_var
-        ).grid(row=11, column=0, columnspan=2, sticky="w", **pad)
+        ).grid(row=12, column=0, columnspan=2, sticky="w", **pad)
 
         self.sort_var = tk.BooleanVar(value=self.cfg.get("keep_sort_alphabetically", False))
         tk.Checkbutton(
             self, text="Keep the Keep checklist sorted alphabetically", variable=self.sort_var
-        ).grid(row=12, column=0, columnspan=2, sticky="w", **pad)
+        ).grid(row=13, column=0, columnspan=2, sticky="w", **pad)
 
         self.ai_rename_var = tk.BooleanVar(value=self.cfg.get("ai_merchant_rename_enabled", False))
         tk.Checkbutton(
             self, text='Use AI to prefix new items with the merchant name (e.g. "Walmart - Toilet tablets")',
             variable=self.ai_rename_var,
-        ).grid(row=13, column=0, columnspan=2, sticky="w", **pad)
+        ).grid(row=14, column=0, columnspan=2, sticky="w", **pad)
 
         self.ai_price_var = tk.BooleanVar(value=self.cfg.get("ai_price_lookup_enabled", False))
         tk.Checkbutton(
             self, text='Use AI to append the best price to unchecked items (e.g. "Milk - $3.49 @ Walmart")',
             variable=self.ai_price_var,
-        ).grid(row=14, column=0, columnspan=2, sticky="w", **pad)
+        ).grid(row=15, column=0, columnspan=2, sticky="w", **pad)
 
-        tk.Label(self, text="Anthropic API Key:").grid(row=15, column=0, sticky="e", **pad)
+        tk.Label(self, text="Anthropic API Key:").grid(row=16, column=0, sticky="e", **pad)
         self.anthropic_key_var = tk.StringVar(value=self.cfg.get("anthropic_api_key", ""))
-        tk.Entry(self, textvariable=self.anthropic_key_var, width=36, show="•").grid(row=15, column=1, **pad)
+        tk.Entry(self, textvariable=self.anthropic_key_var, width=36, show="•").grid(row=16, column=1, **pad)
 
         self.status_var = tk.StringVar(value="")
         self.status_label = tk.Label(self, textvariable=self.status_var, fg="red", wraplength=380, justify="left")
-        self.status_label.grid(row=16, column=0, columnspan=2, **pad)
+        self.status_label.grid(row=17, column=0, columnspan=2, **pad)
 
         self.submit_btn = tk.Button(self, text="Save & Start Syncing", command=self._submit, state="disabled")
-        self.submit_btn.grid(row=17, column=0, columnspan=2, pady=10)
+        self.submit_btn.grid(row=18, column=0, columnspan=2, pady=10)
 
     def _cancel(self) -> None:
         self.result = None
@@ -386,6 +393,9 @@ class SetupWindow(tk.Tk):
             sp_new_task_tag_ids=tag_ids,
             sp_new_task_tag_titles=tag_titles,
             sp_default_task_minutes=estimate_minutes,
+            sp_default_task_priority=(
+                self.priority_var.get() if self.priority_var.get() in core.SP_PRIORITIES else ""
+            ),
             keep_note_title=note_title,
             keep_sort_alphabetically=self.sort_var.get(),
             ai_merchant_rename_enabled=self.ai_rename_var.get(),

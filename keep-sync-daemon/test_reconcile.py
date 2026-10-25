@@ -47,11 +47,11 @@ class FakeSP:
     def list_tasks(self, project_id, include_done=True, source="active"):
         return [t for t in self.tasks.values() if t.project_id == project_id]
 
-    def add_task(self, title, project_id, is_done=False, tag_ids=None, time_estimate_ms=None, notes=None):
+    def add_task(self, title, project_id, is_done=False, tag_ids=None, time_estimate_ms=None, notes=None, priority=None):
         tid = f"sp{self._next}"
         self._next += 1
         self.tasks[tid] = sp_client.SPTask(tid, title, bool(is_done), None, project_id)
-        self.calls.append(("add", tid, title, is_done, tag_ids, time_estimate_ms, notes))
+        self.calls.append(("add", tid, title, is_done, tag_ids, time_estimate_ms, notes, priority))
         return tid
 
     def update_task(self, task_id, patch):
@@ -377,7 +377,48 @@ class DefaultTaskEstimateTests(unittest.TestCase):
         self.assertIsNone(self._add_call(sp)[5])
 
 
+class DefaultTaskPriorityTests(unittest.TestCase):
+    """cfg['sp_default_task_priority'] -> tasks created from Keep items get
+    SP's `priority`."""
+
+    def _priority_for(self, value):
+        note, _ = make_list(items=[("buy milk", False)])
+        sp = FakeSP()
+        c = cfg()
+        if value is not None:
+            c["sp_default_task_priority"] = value
+        core.reconcile_sp(c, FakeKeep([note]), sp, {})
+        return next(call for call in sp.calls if call[0] == "add")[7]
+
+    def test_unset_passes_none(self):
+        self.assertIsNone(self._priority_for(None))
+        self.assertIsNone(self._priority_for(""))
+
+    def test_valid_values_pass_through(self):
+        for value in ("low", "medium", "high"):
+            self.assertEqual(self._priority_for(value), value)
+
+    def test_value_is_normalised(self):
+        self.assertEqual(self._priority_for(" High "), "high")
+
+    def test_junk_value_is_treated_as_none(self):
+        self.assertIsNone(self._priority_for("urgent"))
+
+
 class SPClientAddTaskTests(unittest.TestCase):
+    def test_add_task_puts_priority_in_payload(self):
+        seen = {}
+
+        client = sp_client.SPClient("http://x", "tok")
+        client._request = lambda method, path, **kw: (seen.update(kw), "new-id")[1]
+
+        client.add_task("t", "proj", False, priority="high")
+        self.assertEqual(seen["json"]["priority"], "high")
+
+        seen.clear()
+        client.add_task("t", "proj", False)
+        self.assertNotIn("priority", seen["json"])
+
     def test_add_task_puts_tag_ids_in_payload(self):
         seen = {}
 

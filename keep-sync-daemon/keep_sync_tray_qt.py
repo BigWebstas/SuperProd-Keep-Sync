@@ -245,6 +245,16 @@ class SetupDialog(QDialog):
         layout.addWidget(self.estimate_spin, row, 1)
         row += 1
 
+        layout.addWidget(QLabel("Default task priority:"), row, 0)
+        self.priority_combo = QComboBox()
+        self.priority_combo.addItem("none", "")
+        for p in core.SP_PRIORITIES:
+            self.priority_combo.addItem(p, p)
+        idx = self.priority_combo.findData(self.cfg.get("sp_default_task_priority", "") or "")
+        self.priority_combo.setCurrentIndex(max(idx, 0))
+        layout.addWidget(self.priority_combo, row, 1)
+        row += 1
+
         layout.addWidget(QLabel("Sync every (minutes):"), row, 0)
         self.interval_spin = QSpinBox()
         self.interval_spin.setMinimum(1)
@@ -403,6 +413,7 @@ class SetupDialog(QDialog):
             sp_new_task_tag_ids=tag_ids,
             sp_new_task_tag_titles=tag_titles,
             sp_default_task_minutes=self.estimate_spin.value(),
+            sp_default_task_priority=self.priority_combo.currentData() or "",
             keep_note_title=note_title,
             keep_sort_alphabetically=self.sort_check.isChecked(),
             ai_merchant_rename_enabled=self.ai_rename_check.isChecked(),
