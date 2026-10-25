@@ -394,12 +394,13 @@ class DefaultTaskPriorityTests(unittest.TestCase):
         self.assertIsNone(self._priority_for(None))
         self.assertIsNone(self._priority_for(""))
 
-    def test_valid_values_pass_through(self):
-        for value in ("low", "medium", "high"):
-            self.assertEqual(self._priority_for(value), value)
+    def test_names_become_sp_numbers(self):
+        self.assertEqual(self._priority_for("low"), 1)
+        self.assertEqual(self._priority_for("medium"), 2)
+        self.assertEqual(self._priority_for("high"), 3)
 
     def test_value_is_normalised(self):
-        self.assertEqual(self._priority_for(" High "), "high")
+        self.assertEqual(self._priority_for(" High "), 3)
 
     def test_junk_value_is_treated_as_none(self):
         self.assertIsNone(self._priority_for("urgent"))
@@ -412,8 +413,8 @@ class SPClientAddTaskTests(unittest.TestCase):
         client = sp_client.SPClient("http://x", "tok")
         client._request = lambda method, path, **kw: (seen.update(kw), "new-id")[1]
 
-        client.add_task("t", "proj", False, priority="high")
-        self.assertEqual(seen["json"]["priority"], "high")
+        client.add_task("t", "proj", False, priority=3)
+        self.assertEqual(seen["json"]["priority"], 3)
 
         seen.clear()
         client.add_task("t", "proj", False)

@@ -176,7 +176,7 @@ class SPClient:
         tag_ids: "list[str] | None" = None,
         time_estimate_ms: "int | None" = None,
         notes: "str | None" = None,
-        priority: "str | None" = None,
+        priority: "int | None" = None,
     ) -> str:
         payload = {"title": title, "projectId": project_id, "isDone": bool(is_done)}
         if tag_ids:

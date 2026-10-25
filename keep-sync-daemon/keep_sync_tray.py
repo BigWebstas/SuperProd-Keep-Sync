@@ -209,7 +209,7 @@ class SetupWindow(tk.Tk):
         self.priority_var = tk.StringVar(value=self.cfg.get("sp_default_task_priority", "") or "none")
         ttk.Combobox(
             self, textvariable=self.priority_var, width=8, state="readonly",
-            values=("none",) + core.SP_PRIORITIES,
+            values=("none", *core.SP_PRIORITIES),
         ).grid(row=10, column=1, sticky="w", **pad)
 
         tk.Label(self, text="Sync every (minutes):").grid(row=11, column=0, sticky="e", **pad)

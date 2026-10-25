@@ -674,15 +674,17 @@ def _default_task_estimate_ms(cfg: dict) -> "int | None":
     return minutes * 60_000 if minutes > 0 else None
 
 
-# SP's task `priority` values, lowest first; "" in config means "don't set".
-SP_PRIORITIES = ("low", "medium", "high")
+# SP stores task `priority` as a number (1 = Low .. 3 = High). Config and the
+# setup dialogs use the names; "" in config means "don't set".
+SP_PRIORITIES = {"low": 1, "medium": 2, "high": 3}
 
 
-def _default_task_priority(cfg: dict) -> "str | None":
-    """Config's `sp_default_task_priority` if it is one of SP_PRIORITIES, else
-    None. Like the estimate, SP only takes it at task creation."""
-    value = str(cfg.get("sp_default_task_priority") or "").strip().lower()
-    return value if value in SP_PRIORITIES else None
+def _default_task_priority(cfg: dict) -> "int | None":
+    """Config's `sp_default_task_priority` (a SP_PRIORITIES name) as SP's
+    numeric `priority`, or None when unset / unrecognised. Like the estimate,
+    SP only takes it at task creation."""
+    name = str(cfg.get("sp_default_task_priority") or "").strip().lower()
+    return SP_PRIORITIES.get(name)
 
 
 # --- AI merchant-prefix rename ------------------------------------------------
